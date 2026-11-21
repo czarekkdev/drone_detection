@@ -14,7 +14,7 @@ import cv2, numpy as np, torch
 from ultralytics import YOLO
 from tracker import TwoDroneTracker
 import tracker as TRK
-CONFS, LAST = {}, {}  # per drone number: confidences in its current appearance, last frame seen
+CONFS, LAST, DRAWN = {}, {}, {}  # per drone number: confidences in its current appearance, last frame seen
 import layers as LY
 from consensus import Consensus, view as cview
 
@@ -27,8 +27,8 @@ p.add_argument("--imgsz", type=int, default=1280)
 p.add_argument("--no-show", action="store_true"); p.add_argument("--no-save", action="store_true")
 p.add_argument("--out", default=os.path.join(HERE, "demo_out"))
 p.add_argument("--layer-width", type=int, default=480)
-p.add_argument("--show-min", type=float, default=0.3, help="only DRAW boxes at least this confident (the saved .txt keeps all boxes; "
-               "for the score, hiding low boxes costs: 0.3 -> MOTA -0.002)")
+p.add_argument("--show-min", type=float, default=0.3, help="a NEW drone is drawn only at this confidence; once on screen it stays down to tracker.MIN_SHOW "
+               "(0.05), so it doesn't flicker. Screen only, the saved .txt is not affected")
 p.add_argument("--boost-lo", type=float, default=0.10); p.add_argument("--boost-to", type=float, default=0.65)
 a = p.parse_args()
 dev = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
@@ -192,10 +192,12 @@ while True:
         for f, i, (x1, y1, x2, y2), c in out:  # on screen: a drone is drawn once it has been there MIN_TRACK frames
             if f == n:
                 if LAST.get(i, -99) < n - 5:
-                    CONFS[i] = []
+                    CONFS[i] = []; DRAWN[i] = False  # new appearance
                 CONFS[i].append(c); LAST[i] = n
             seen = CONFS.get(i, [])
-            if f == n and c >= a.show_min and len(seen) >= TRK.MIN_TRACK and np.median(seen[:60]) >= TRK.MIN_TRACK_CONF:
+            bar = TRK.MIN_SHOW if DRAWN.get(i) else a.show_min  # new drone: --show-min; already on screen: much lower
+            if f == n and c >= bar and len(seen) >= TRK.MIN_TRACK and np.median(seen[:60]) >= TRK.MIN_TRACK_CONF:
+                DRAWN[i] = True
                 col = COL.get(i, (0, 255, 0))
                 cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), col, 3)
                 cv2.putText(img, f"drone {i} {c:.2f}", (int(x1), max(20, int(y1) - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, col, 2)

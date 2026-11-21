@@ -12,6 +12,8 @@ HANDOVER = True    # a newly confirmed track takes over the number of a same-siz
                    # Anti-UAV 67 videos: ID switches 63 -> 53; practice videos unchanged
 INSIDE = 0.7       # a box lying this much inside a tracked drone's box can't start a new track (part of the same drone)
 MERGE = True       # two tracks on the same drone (one box INSIDE the other): keep the one seen longer, drop the other
+MIN_SHOW_NEW = 0.05  # a drone not shown yet (new, or back after being lost) needs this to appear; once shown, MIN_SHOW.
+                     # Tested (new/kept): 0.05/0.05 best; 0.2-0.3/0.02 and 0.05/0-0.02 slightly worse (0.877 vs 0.878)
 MIN_TRACK = 12     # result files: drop every appearance of a drone (same number, gaps <= 5 frames) shorter than this
                    # many frames (0.4 s). Real setup: 0.8848 -> 0.8882; Anti-UAV ID switches 35 -> 21. 30 (1 s) is worse.
                    # Applied when the file is written (needs to see the whole appearance); 0 = off
@@ -61,6 +63,7 @@ class Track:
         self.hist = [(frame, tuple(box[:4]), conf)]  # kept while tentative, written out on confirmation
         self.aspect = (box[2] - box[0]) / max(box[3] - box[1], 1)
         self.last_obs = xyxy_to_cxcywh(box)
+        self.shown = False  # has a box of this appearance been output yet
 
     def peek(self):
         """predicted box for the NEXT frame, without changing the filter"""
@@ -221,7 +224,7 @@ class TwoDroneTracker:
         # retire long-missing actives to the lost list
         for t in list(self.active):
             if t.miss > P["coast"]:
-                self.active.remove(t); self.lost[t.id] = t
+                self.active.remove(t); self.lost[t.id] = t; t.shown = False
         out = list(backfill)
         for t in self.active:
             if t.miss == 0:
@@ -235,7 +238,14 @@ class TwoDroneTracker:
                 if not any(max(_inside(o[2], k[2]), _inside(k[2], o[2])) >= INSIDE or _close(o[2], k[2]) for k in keep):
                     keep.append(o)
             out = [o for o in out if o[0] != frame] + keep
-        return [o for o in out if o[3] >= MIN_SHOW]
+        shown = {t.id: t for t in self.active}; res = []
+        for o in out:
+            t = shown.get(o[1]) if o[0] == frame else None
+            if o[3] >= (MIN_SHOW if t is not None and t.shown else MIN_SHOW_NEW):
+                res.append(o)
+                if t is not None:
+                    t.shown = True
+        return res
 
     def _clip(self, o):
         """keep boxes inside the picture (a coasting drone flying out would otherwise get negative coordinates);
