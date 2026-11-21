@@ -33,6 +33,9 @@ p.add_argument("--view", default="camera", choices=["camera", "overlay", "shapes
 p.add_argument("--show-min", type=float, default=0.3, help="a NEW drone is drawn only at this confidence; once on screen it stays down to tracker.MIN_SHOW "
                "(0.05), so it doesn't flicker. Screen only, the saved .txt is not affected")
 p.add_argument("--boost-lo", type=float, default=0.10); p.add_argument("--boost-to", type=float, default=0.65)
+p.add_argument("--still-window", type=int, default=30, help="frames before suppressing a track with no movement or pixel change (0 disables)")
+p.add_argument("--still-motion", type=float, default=40.0, help="minimum mean aligned pixel-change score to keep a stationary track")
+p.add_argument("--still-drift", type=float, default=6.0, help="minimum center movement in pixels across the stillness window")
 a = p.parse_args()
 dev = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
 full = YOLO(a.full_weights)
@@ -57,6 +60,7 @@ LAYER_VIEW_START = 20
 CONSENSUS_VIEW = LAYER_VIEW_START + len(LAYER_KEYS)
 MOTION_VIEW = CONSENSUS_VIEW + 1
 krun, prev_bl, TRAIL, lines = {}, [], {}, []
+still_history = {}  # per-ID recent center positions and camera-aligned pixel change
 
 
 def iou(p_, q):
@@ -121,6 +125,27 @@ def diagnostic_grid(L, cam, consensus_mask, consensus_blobs, motion_blobs, scale
         canvas[y0:y1, x0:x1] = tile
     return canvas
 
+def motion_outline(img, box, motion, scale):
+    """Draw the largest compact camera-compensated pixel-change region inside a track box."""
+    x1, y1, x2, y2 = [int(v * scale) for v in box]
+    x1, y1 = max(x1, 0), max(y1, 0); x2, y2 = min(x2, motion.shape[1]), min(y2, motion.shape[0])
+    if x2 <= x1 or y2 <= y1:
+        return
+    roi = (motion[y1:y2, x1:x2] > 96).astype(np.uint8) * 255
+    roi = cv2.morphologyEx(roi, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(roi, 8)
+    if count <= 1:
+        return
+    idx = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    if stats[idx, cv2.CC_STAT_AREA] < 2:
+        return
+    component = (labels == idx).astype(np.uint8) * 255
+    contours, _ = cv2.findContours(component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    offset = np.array([[[x1 / scale, y1 / scale]]])
+    contours = [np.round(c.astype(np.float32) / scale + offset).astype(np.int32) for c in contours]
+    cv2.drawContours(img, contours, -1, (255, 255, 0), 1)
+
+
 def step(img):
     global prev_bl
     info = {"boosted": [], "kept": [], "crops": []}
@@ -177,7 +202,29 @@ def step(img):
             else:
                 krun[tid] = 5
     prev_bl = cbl
-    return T.step(n, dets), info
+    out = T.step(n, dets)
+    if a.still_window > 0:
+        motion = np.maximum(L["short"], L["long"])
+        kept = []
+        for f, tid, box, conf in out:
+            if f == n and tid is not None:
+                x1, y1, x2, y2 = [int(v * LM.s) for v in box]
+                x1, y1 = max(x1, 0), max(y1, 0)
+                x2, y2 = min(x2, motion.shape[1]), min(y2, motion.shape[0])
+                roi = motion[y1:y2, x1:x2] if x2 > x1 and y2 > y1 else np.zeros((0, 0), np.uint8)
+                pixel_change = float(roi.mean()) if roi.size else 0.0
+                cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+                hist = still_history.setdefault(tid, [])
+                hist.append((cx, cy, pixel_change))
+                del hist[:-a.still_window]
+                no_motion = (len(hist) == a.still_window
+                             and np.mean([q[2] for q in hist]) < a.still_motion
+                             and np.hypot(hist[-1][0] - hist[0][0], hist[-1][1] - hist[0][1]) < a.still_drift)
+                if no_motion:
+                    continue
+            kept.append((f, tid, box, conf))
+        out = kept
+    return out, info
 
 
 n, t0, frame, out, info = 0, time.time(), None, [], {}
@@ -238,6 +285,7 @@ while True:
             if f == n and c >= bar and len(seen) >= TRK.MIN_TRACK and np.median(seen[:60]) >= TRK.MIN_TRACK_CONF:
                 DRAWN[i] = True
                 col = COL.get(i, (0, 255, 0))
+                motion_outline(img, (x1, y1, x2, y2), np.maximum(info["L"]["short"], info["L"]["long"]), LM.s)
                 cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), col, 3)
                 cv2.putText(img, f"drone {i} {c:.2f}", (int(x1), max(20, int(y1) - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, col, 2)
     fps = n / max(time.time() - t0, 1e-6)
