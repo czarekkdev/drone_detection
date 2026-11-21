@@ -117,7 +117,7 @@ so you need **two `.hef` files**: `skyguard.hef` (whole frame) and `crop_640.hef
 
 Status: **not tested on a real Pi yet** and 50 fps not measured yet. Expect small fixes on the first run.
 
-Overview (4 machines' worth of steps, but the Mac does 1 and 2):
+Overview (3 machines: Mac, a Linux PC for compiling, the Pi):
 
 | Step | Where | Result |
 |---|---|---|
