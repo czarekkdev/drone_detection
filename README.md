@@ -81,38 +81,108 @@ yellow box = booster confirmed a faint detection, dashed box = keeper held the t
 Check on the Mac (same code, PyTorch instead of Hailo): `python pi_run.py ../test_sample_clean --out results` and score `results/`.
 With `--dets preds/hf_skyguard` it reuses the cached whole-frame detections and gives byte-identical files to `pipeline_boost.py`. `--simple` = old pipeline.
 
-## Windows
+## Windows 10/11: complete guide
 
-Everything except the Hailo compile runs on Windows 10/11 the same way. In PowerShell:
+The detector, tracker, training scripts, evaluator, and live/video demos run natively in Windows PowerShell. Hailo `.hef` compilation is the exception; use WSL2 for that section below. These steps assume PowerShell, Python 3.11, and a project folder under your user directory.
 
-    cd "drone detecting"                 # the folder that holds pretrained\, test_sample_clean\, datasets
+### 1. Install Python and get the project
+
+Install Python 3.11 from [python.org](https://www.python.org/downloads/) and select **Add Python to PATH** in the installer. Open a new PowerShell window and confirm `py -3.11 --version` prints Python 3.11. Then:
+
+    $Root = "$env:USERPROFILE\drone detecting"
+    New-Item -ItemType Directory -Force $Root | Out-Null
+    Set-Location $Root
     git clone https://github.com/czarekkdev/drone_detection code
-    cd code
+    Set-Location "$Root\code"
+
+If Git is not installed, install Git for Windows first. Keep the repository in a normal Windows folder such as `C:\Users\<you>\drone detecting`; do not put the virtual environment inside OneDrive or a synced folder.
+
+### 2. Create the environment and install packages
+
     py -3.11 -m venv .venv
-    .venv\Scripts\Activate.ps1          # if blocked: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-    # NVIDIA GPU: install the CUDA build of PyTorch first (skip this line for CPU only)
+    .\.venv\Scripts\Activate.ps1
+
+If PowerShell blocks activation, run this once for your Windows account, close and reopen PowerShell, then activate again:
+
+    Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+
+For an NVIDIA graphics card, install the matching PyTorch CUDA build from [PyTorch's install selector](https://pytorch.org/get-started/locally/) first. For example, for CUDA 12.4:
+
+    python -m pip install --upgrade pip
     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
     pip install -r requirements.txt
-    python -c "import torch; print(torch.cuda.is_available())"     # True = GPU will be used
+    python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
-Folder layout is the same as on the Mac: the repo folder next to `pretrained\`, `test_sample_clean\` and the datasets,
-e.g. `..\test_sample_clean\<video folder>\video.mp4`. Then the commands above work unchanged, for example:
+For CPU-only use, skip the CUDA install and install the project dependencies:
 
-    python demo.py "..\test_sample_clean\test_6_hard_PXL_20261113_154422245_hard\video.mp4" --show
-    python run_video.py --weights ..\pretrained\drone-detection-yolov11\best.pt --videos ..\test_sample_clean --out preds\x --imgsz 1280 --conf 0.01
-    python pipeline.py --videos ..\test_sample_clean --dets preds\x --out preds\x_trk --weights ..\pretrained\drone-detection-yolov11\best.pt --no-motion
-    python eval_track.py --gt ..\test_sample_clean --pred preds\x_trk
+    python -m pip install --upgrade pip
+    pip install -r requirements.txt
+    python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
-Notes:
-- The scripts pick the device themselves (CUDA GPU if there is one, otherwise CPU; `--device cpu` forces CPU).
-  On CPU the demo runs at only a few fps.
-- Put paths with spaces in quotes.
-- GPU with less than 6 GB memory: train with `--batch 8`.
-- If training can't find the images, put the full path on the `path:` line of the yaml,
-  e.g. `path: C:/Users/<name>/drone detecting/code/drone_data`.
-- Training works on Windows too (`python finetune.py ...`); with an NVIDIA GPU it is usually faster than the Mac.
-- **Hailo compile on Windows:** install WSL2 with Ubuntu 22.04 (`wsl --install -d Ubuntu-22.04`) and run the
-  Hailo Dataflow Compiler inside it; that counts as the x86 Linux PC in step 2 below.
+`CUDA available: True` means PyTorch can use the NVIDIA GPU. If it prints `False`, the code still runs on the CPU, but video processing and the demo will be slower. AMD graphics cards are not supported by the CUDA setup.
+
+### 3. Add the model weights and test videos
+
+The Git repository does not include model weights or the practice videos. Arrange the folders like this (the video and ground-truth files are supplied separately):
+
+    drone detecting\
+      code\                         # cloned repository; run commands from here
+        .venv\
+        runs\ft_1280\weights\epoch0.pt   # fine-tuned crop model, if using best setup
+      pretrained\drone-detection-yolov11\best.pt
+      test_sample_clean\
+        video_name\video.mp4
+        video_name\gt\gt.txt
+
+Create the parent folders as needed and copy the supplied files into these locations. If you have only the SkyGuard `best.pt` and no `epoch0.pt`, you can still run detection and the basic tracker; the full best setup below needs both weight files. Check that PowerShell can see the files before starting:
+
+    Test-Path ..\pretrained\drone-detection-yolov11\best.pt
+    Get-ChildItem ..\test_sample_clean -Recurse -Filter video.mp4
+    Test-Path runs\ft_1280\weights\epoch0.pt
+
+Each `Test-Path` needed for the command you plan to run should return `True`. Keep paths with spaces inside double quotes.
+
+### 4. Run detection, tracking, and scoring
+
+Run these from the repository folder with `.venv` active. Replace the video folder or weights path if yours differs. The angle brackets in documentation examples mean “replace this value”; do not type the brackets in PowerShell.
+
+Run whole-frame detection first. This creates one detection file per input video under `preds\hf_skyguard`:
+
+    python run_video.py --weights ..\pretrained\drone-detection-yolov11\best.pt --videos ..\test_sample_clean --out preds\hf_skyguard --imgsz 1280 --conf 0.01 --keep drone
+    Get-ChildItem preds\hf_skyguard\*.txt
+
+Then run the full shape-assisted tracker (requires the fine-tuned crop model), followed by the organizer's evaluator:
+
+    python pipeline_boost.py --videos ..\test_sample_clean --dets preds\hf_skyguard --out preds\best --weights runs\ft_1280\weights\epoch0.pt --no-motion --layer-width 480 --verify --keeper2 --agree-boost 0.1 --boost-to 0.65 --crop-scale 2
+    python evaluation.py --gt_dir ..\test_sample_clean --pred_dir preds\best
+
+Copy the organizer-supplied `evaluation.py` into the repository folder before running the last command. It is separate from this repo. Check that `preds\hf_skyguard` and `preds\best` contain non-empty `.txt` files for the videos. If the evaluator reports missing files, first compare the video folder names under `test_sample_clean` with the prediction filenames; if it reports empty files, check that detection created boxes before running the tracker.
+
+If you do not have the crop model or organizer evaluator, run the basic pipeline and included evaluator instead:
+
+    python pipeline.py --videos ..\test_sample_clean --dets preds\hf_skyguard --out preds\basic --weights ..\pretrained\drone-detection-yolov11\best.pt --no-motion
+    python eval_track.py --gt ..\test_sample_clean --pred preds\basic
+
+You can also use the evaluator supplied by the team with `--pred_dir preds\basic` if its expected prediction format matches the generated files.
+
+### 5. Play a video or use a camera
+
+    python demo_boost.py --video "..\test_sample_clean\test_6_hard_PXL_20261113_154422245_hard\video.mp4"
+    python demo_boost.py --video 0
+
+The live camera is usually device `0`; try `1` if you have multiple cameras. Press `q` to quit. In `demo_boost.py`, press `f` to toggle the optional camera-motion-subtracted optical-flow view; it adds processing while enabled and does not change detections. Press `o` to toggle the combined-shape view.
+
+### Common Windows issues
+
+- **`python` is not recognized:** reinstall Python 3.11 with **Add Python to PATH**, or use `py -3.11` to create the environment. After activation, `python --version` should show 3.11.
+- **Activation is disabled:** use the one-time `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` command above, or run commands with `.\.venv\Scripts\python.exe` without activating.
+- **`FileNotFoundError`:** run `Get-Location` and `Test-Path <path>`; relative paths are resolved from the current folder. The commands in this guide expect the current folder to be `drone detecting\code`.
+- **CUDA is unavailable:** verify the GPU is NVIDIA and reinstall the PyTorch build selected for your installed driver. CPU mode remains available.
+- **OpenCV cannot open a video/camera:** try a different camera number, close other apps using the camera, and confirm the video plays in a media player.
+- **Out of memory:** close GPU-heavy apps; for training, lower the batch size (for example `--batch 8`).
+- **Hailo compile:** native Windows is not supported for the compiler; use WSL2 Ubuntu 22.04 as described in the next section.
+
+Training also runs from the activated environment, for example `python finetune.py ...`. If training cannot find images, set the dataset `path:` in the YAML to an absolute Windows path using forward slashes, such as `C:/Users/name/drone detecting/code/drone_data`.
 
 ## Raspberry Pi 5 + AI HAT+ (Hailo-8)
 
