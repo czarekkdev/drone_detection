@@ -1,0 +1,8 @@
+# same data as drone_1280.yaml, but a random 50% of EACH source (hackathon / Anti-UAV / AOD4 negatives), seed 0.
+# (fraction=0.5 would take the first half of the sorted list = Anti-UAV only.)
+path: drone_data
+train: train_1280_half.txt
+val:
+  - antiuav/val/images
+names:
+  0: drone

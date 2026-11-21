@@ -1,0 +1,5 @@
+path: /Users/cezaryjudka/Downloads/drone detecting/code/drone_data
+train: train/images
+val: val/images
+names:
+  0: drone

@@ -1,0 +1,8 @@
+# Big 1280 run: per-source random sample (seed 0), list in drone_data/train_all_1280.txt
+# hackathon 13k, Anti-UAV 16k, DUT all, AOD4 drones all, negatives ~15% (AOD4 / MBAOD non-drone / FBD-SV birds)
+path: drone_data
+train: train_all_1280.txt
+val:
+  - antiuav/val/images
+names:
+  0: drone

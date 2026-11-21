@@ -1,0 +1,27 @@
+# OS / Python
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+
+# Datasets & test videos (too large for git)
+Anti-UAV-RGBT training data/
+hackathon_dataset/
+test_sample_clean/
+code/drone_data/
+
+# Model weights
+*.pt
+*.pth
+*.onnx
+*.engine
+pretrained/
+
+# Outputs / logs
+code/runs/
+code/preds/
+code/demo_out/
+*.log
+*.mp4
+*.avi
+*.mov

@@ -1,0 +1,10 @@
+# 1280 px run: hackathon + Anti-UAV + AOD4 plane/bird/helicopter negatives. paths relative to code/
+path: drone_data
+train:
+  - train/images            # hackathon_dataset
+  - antiuav/train/images    # Anti-UAV-RGBT visible
+  - negatives/images        # AOD4: drones boxed, airplane/bird/helicopter unlabeled
+val:
+  - antiuav/val/images
+names:
+  0: drone

@@ -1,0 +1,145 @@
+diff --git a/boost.py b/boost.py
+index a49df95..2f1c805 100644
+--- a/boost.py
++++ b/boost.py
+@@ -5,6 +5,7 @@ Per frame, given the whole-frame detections and the tracker:
+   2 shape layer (layers.py + consensus.py at 480 px, CPU)
+   3 verify: weak boxes (< 0.5) with no shape support -> conf x0.3
+   4 agreement booster: boxes with conf 0.10-0.30 and a same-place, same-size blob -> 0.65
++  (option --static-new: a box with no movement at all may not start a new track; off, it did not help on the practice set)
+   5 keeper2: keep a track <= 5 frames if a blob near its prediction moves like the track (conf 0.25)
+ Returns the detections to give to TwoDroneTracker.step."""
+ import time
+@@ -41,13 +42,13 @@ def same_place(d, b):
+ class Booster:
+     def __init__(self, crop_backend, crop=320, crop_imgsz=320, crop_scale=2.0, layer_width=480,
+                  verify=True, verify_below=0.5, verify_mult=0.3, agree_lo=0.1, boost_to=0.65,
+-                 keeper2=True, keeper_conf=0.25, keeper_max=5, use_layers=True, use_crops=True):
++                 keeper2=True, keeper_conf=0.25, keeper_max=5, use_layers=True, use_crops=True, static_new=0.0):
+         self.cb = crop_backend; self.crop, self.crop_imgsz, self.k = crop, crop_imgsz, crop_scale
+         self.verify, self.vb, self.vm = verify, verify_below, verify_mult
+         self.lo, self.hi = agree_lo, boost_to
+         self.keeper2, self.kconf, self.kmax = keeper2, keeper_conf, keeper_max
+         self.use_layers, self.use_crops = use_layers, use_crops
+-        self.lw = layer_width
++        self.lw = layer_width; self.static_new = static_new
+         self.reset()
+ 
+     def reset(self):
+@@ -98,6 +99,17 @@ class Booster:
+         if self.lo:  # 4
+             dets = [(*d[:4], max(d[4], self.hi)) if self.lo <= d[4] < 0.3 and any(same_place(d, b) for b in cbl) else d
+                     for d in dets]
++        if self.static_new:  # 4b (option, off in the best setup): a box with no movement at all, far from every track,
++            # may not START a track (confidence kept just under the tracker's 'high'); it can still feed an existing track
++            hi = T.p["high"]; sh, lg = L["short"], L["long"]; Hm, Wm = sh.shape; nd = []
++            for d in dets:
++                if d[4] >= hi and len(self.LM.grays) > self.LM.long_gap and not any(iou(d, tr.peek()) > 0.1 for tr in T.active + T.tentative):
++                    x1, y1, x2, y2 = [int(v * self.LM.s) for v in d[:4]]
++                    x1, y1 = max(x1 - 1, 0), max(y1 - 1, 0); x2, y2 = min(max(x2 + 2, x1 + 1), Wm), min(max(y2 + 2, y1 + 1), Hm)
++                    if max(sh[y1:y2, x1:x2].max(), lg[y1:y2, x1:x2].max()) < self.static_new:
++                        d = (*d[:4], hi - 0.01)
++                nd.append(d)
++            dets = nd
+         if self.keeper2:  # 5
+             vel = {t.id: (t.kf.x[4], t.kf.x[5]) for t in T.active if t.id is not None}
+             for tid, pb, miss in preds:
+diff --git a/pi_run.py b/pi_run.py
+index 141f5d3..09afe22 100644
+--- a/pi_run.py
++++ b/pi_run.py
+@@ -166,6 +166,7 @@ if __name__ == "__main__":
+     p.add_argument("--simple", action="store_true", help="old pipeline: no shape layer, plain 1x crops with the whole-frame model")
+     p.add_argument("--realtime", action="store_true", help="feed frames at the video's own fps, like a camera")
+     p.add_argument("--out", default="results")
++    p.add_argument("--static-new", type=float, default=0.0, help="boxes with no movement (max motion < this, e.g. 10) may not start a new track; off by default (0.882 vs 0.883 on the practice set)")
+     a = p.parse_args()
+     if a.backend == "hailo":
+         from hailo_platform import VDevice
+@@ -184,7 +185,7 @@ if __name__ == "__main__":
+     if a.simple:
+         booster = Booster(cb, crop_scale=1.0, crop_imgsz=320, use_layers=False)
+     else:
+-        booster = Booster(cb, crop_scale=2.0, crop_imgsz=320, layer_width=a.layer_width)
++        booster = Booster(cb, crop_scale=2.0, crop_imgsz=320, layer_width=a.layer_width, static_new=a.static_new)
+     os.makedirs(a.out, exist_ok=True)
+     if os.path.isdir(a.source):
+         for v in sorted(glob.glob(os.path.join(a.source, "*", "video.mp4"))):
+diff --git a/tracker.py b/tracker.py
+index 2bd214d..78ec0fb 100644
+--- a/tracker.py
++++ b/tracker.py
+@@ -6,6 +6,10 @@ from scipy.optimize import linear_sum_assignment
+ 
+ REACQ_GAP = 30     # frames: how long after losing a drone we may take it back under its own id
+ REACQ_CONF = 0.20  # min box confidence for re-acquisition
++HANDOVER = 1       # frames: a newly confirmed drone takes over the id of a track that has been coasting this long (0 = off)
++INSIDE = 0.7       # a box lying this much inside an active track's box (2nd box on PART of the same drone) can't start a new track (0 = off)
++MIN_SHOW = 0.05    # boxes below this confidence are not output / shown (tracks still run): practice 0.8832 -> 0.8848, Anti-UAV 0.631 -> 0.635
++MERGE = 1          # two tracks on the same drone (one box >70% inside the other) for this many frames: keep the one seen longest (0 = off)
+ REACQ_DIST = 1.5   # max distance from where it was last seen, in drone sizes (grows 15%/frame of gap)
+ 
+ 
+@@ -34,6 +38,12 @@ class KF:
+         self.x = self.x + K @ y; self.P = (np.eye(8) - K @ self.H) @ self.P
+ 
+ 
++def inside(a, b):
++    """fraction of box a that lies inside box b"""
++    i = max(0, min(a[2], b[2]) - max(a[0], b[0])) * max(0, min(a[3], b[3]) - max(a[1], b[1]))
++    return i / max((a[2] - a[0]) * (a[3] - a[1]), 1e-6)
++
++
+ def xyxy_to_cxcywh(b):
+     return ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2, b[2] - b[0], b[3] - b[1])
+ 
+@@ -168,17 +178,38 @@ class TwoDroneTracker:
+         self.tentative = [t for i, t in enumerate(self.tentative) if i not in set(ut3)]
+         for k in ud3:
+             d = dets[left[k]]
+-            if d[4] >= P["new"]:
++            if d[4] >= P["new"] and not (INSIDE and any(inside(d, a.box()) > INSIDE or inside(a.box(), d) > INSIDE for a in self.active)):
+                 self.tentative.append(Track(d[:4], d[4], frame, feats[left[k]]))
+         # promote confirmed tentatives
+         backfill = []
+         for t in list(self.tentative):
+             if t.hits >= P["confirm"]:
++                # HANDOVER: a drone that stopped / turned suddenly leaves its old track coasting into empty sky while a
++                # new track forms on it; give the new track the coasting track's id instead of the other (free) id
++                taken = None  # (id, last real hit) of a coasting track whose id this drone takes over
++                if HANDOVER > 0:
++                    co = [a for a in self.active if a.id is not None and a.miss >= HANDOVER
++                          and abs(np.log(max(t.kf.x[2] * t.kf.x[3], 1) / max(a.last_obs[2] * a.last_obs[3], 1))) < 1.0]
++                    if co:
++                        a = max(co, key=lambda a: a.miss); self.active.remove(a); self.lost[a.id] = a; taken = (a.id, a.last)
+                 i = self._assign_id(t, frame)
+                 if i is not None:
+                     t.id = i; self.lost.pop(i, None); self.active.append(t); self.tentative.remove(t)
+-                    backfill += [(f, i, b, c) for f, b, c in t.hist if f != frame and self.backfill]
++                    # (frames after the old track's last real hit already got its coasting box under this id: not twice)
++                    backfill += [(f, i, b, c) for f, b, c in t.hist if f != frame and self.backfill
++                                 and not (taken and i == taken[0] and f > taken[1])]
+                     t.hist = []
++        if MERGE:  # two confirmed tracks sitting on the same drone (one box inside the other): keep the one seen longest
++            for a_ in list(self.active):
++                for b_ in list(self.active):
++                    if a_ is b_ or a_ not in self.active or b_ not in self.active:
++                        continue
++                    if inside(a_.box(), b_.box()) > 0.7 or inside(b_.box(), a_.box()) > 0.7:
++                        a_.same = getattr(a_, "same", 0) + 1
++                        if a_.same >= MERGE and a_.hits <= b_.hits:
++                            self.active.remove(a_); self.lost.pop(a_.id, None)
++                    elif a_ in self.active:
++                        a_.same = 0
+         # retire long-missing actives to the lost list
+         for t in list(self.active):
+             if t.miss > P["coast"]:
+@@ -189,7 +220,7 @@ class TwoDroneTracker:
+                 out.append((frame, t.id, t.box(), t.conf))
+             else:  # coasting: predicted box, lower confidence
+                 out.append((frame, t.id, t.box(), t.conf * 0.6 ** t.miss))
+-        return [o for o in (self._clip(o) for o in out) if o is not None]
++        return [o for o in (self._clip(o) for o in out) if o is not None and o[3] >= MIN_SHOW]
+ 
+     def _clip(self, o):
+         """keep boxes inside the picture (a coasting drone flying out would otherwise get negative coordinates);

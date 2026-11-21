@@ -1,0 +1,208 @@
+"""Two-drone tracker: Kalman (constant velocity) + ByteTrack-style two-threshold matching,
+max 2 ids, confirmation, short coasting, and re-identification of returning drones.
+Works on any per-frame detection list, so the same code runs offline (on result files) and live on the Pi."""
+import numpy as np
+from scipy.optimize import linear_sum_assignment
+
+
+class KF:
+    """state [cx, cy, w, h, vx, vy, vw, vh]"""
+    def __init__(self, box):
+        cx, cy, w, h = box
+        self.x = np.array([cx, cy, w, h, 0, 0, 0, 0], float)
+        s = max(w, h)
+        self.P = np.diag([s, s, s, s, 10 * s, 10 * s, s, s]) ** 2 * 0.01 + np.eye(8)
+        self.F = np.eye(8); self.F[:4, 4:] = np.eye(4)
+        self.H = np.eye(4, 8)
+
+    def predict(self):
+        s = max(self.x[2], self.x[3], 4)
+        Q = np.diag([.05 * s, .05 * s, .05 * s, .05 * s, .1 * s, .1 * s, .02 * s, .02 * s]) ** 2
+        self.x = self.F @ self.x; self.P = self.F @ self.P @ self.F.T + Q
+        self.x[2:4] = np.maximum(self.x[2:4], 2)
+        return self.x[:4]
+
+    def update(self, box):
+        s = max(self.x[2], self.x[3], 4)
+        R = np.diag([.05 * s, .05 * s, .1 * s, .1 * s]) ** 2
+        y = np.asarray(box, float) - self.H @ self.x
+        S = self.H @ self.P @ self.H.T + R; K = self.P @ self.H.T @ np.linalg.inv(S)
+        self.x = self.x + K @ y; self.P = (np.eye(8) - K @ self.H) @ self.P
+
+
+def xyxy_to_cxcywh(b):
+    return ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2, b[2] - b[0], b[3] - b[1])
+
+
+class Track:
+    def __init__(self, box, conf, frame, feat=None):
+        self.kf = KF(xyxy_to_cxcywh(box)); self.hits = 1; self.miss = 0
+        self.conf = conf; self.last = frame; self.id = None; self.feat = feat
+        self.hist = [(frame, tuple(box[:4]), conf)]  # kept while tentative, written out on confirmation
+        self.aspect = (box[2] - box[0]) / max(box[3] - box[1], 1)
+
+    def peek(self):
+        """predicted box for the NEXT frame, without changing the filter"""
+        cx, cy, w, h = (self.kf.F @ self.kf.x)[:4]
+        return (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
+
+    def box(self):
+        cx, cy, w, h = self.kf.x[:4]
+        return (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
+
+
+def cost_matrix(tracks, dets, gate):
+    """centre distance divided by object size; > gate = impossible"""
+    C = np.full((len(tracks), len(dets)), 1e6)
+    for i, t in enumerate(tracks):
+        cx, cy, w, h = t.kf.x[:4]; s = max(w, h, 12) * (1 + 0.5 * min(t.miss, 10))
+        for j, d in enumerate(dets):
+            dx, dy, dw, dh = xyxy_to_cxcywh(d[:4])
+            c = np.hypot(dx - cx, dy - cy) / s + 0.5 * abs(np.log(max(dw * dh, 1) / max(w * h, 1)))
+            if c < gate:
+                C[i, j] = c
+    return C
+
+
+def match(tracks, dets, gate):
+    if not tracks or not dets:
+        return [], list(range(len(tracks))), list(range(len(dets)))
+    C = cost_matrix(tracks, dets, gate); r, c = linear_sum_assignment(C)
+    m = [(i, j) for i, j in zip(r, c) if C[i, j] < 1e5]
+    mi, mj = {i for i, _ in m}, {j for _, j in m}
+    return m, [i for i in range(len(tracks)) if i not in mi], [j for j in range(len(dets)) if j not in mj]
+
+
+class TwoDroneTracker:
+    def __init__(self, high=0.6, low=0.05, new=0.3, confirm=3, coast=3, keep_lost=900, gate=2.5,
+                 max_ids=2, w_feat=1.0, w_pos=1.0, new_id_cost=1.0, backfill=True, frame_size=(1920, 1080)):
+        self.p = dict(high=high, low=low, new=new, confirm=confirm, coast=coast, keep_lost=keep_lost, gate=gate)
+        self.max_ids, self.w_feat, self.w_pos, self.W, self.H = max_ids, w_feat, w_pos, *frame_size
+        self.new_id_cost = new_id_cost
+        self.backfill = backfill
+        self.active, self.tentative = [], []
+        self.lost = {}  # id -> Track (kept for re-id)
+
+    def _free_ids(self):
+        used = {t.id for t in self.active}
+        return [i for i in range(1, self.max_ids + 1) if i not in used]
+
+    def _assign_id(self, t, frame):
+        free = self._free_ids()
+        if not free:
+            return None
+        if len(free) == 1:
+            return free[0]
+        # several ids free: pick the lost track that best explains this new drone
+        best, bid = 1e9, None
+        for i in free:
+            if i not in self.lost:
+                c = self.new_id_cost  # never-seen id
+            else:
+                L = self.lost[i]; gap = max(frame - L.last, 1)
+                lx, ly = L.kf.x[0], L.kf.x[1]  # last position (frozen when lost)
+                nx, ny = t.kf.x[0], t.kf.x[1]
+                c = self.w_pos * np.hypot(nx - lx, ny - ly) / np.hypot(self.W, self.H) * 4
+                c += 0.5 * abs(np.log(max(t.aspect, .1) / max(L.aspect, .1)))
+                if t.feat is not None and L.feat is not None:
+                    c += self.w_feat * feat_dist(t.feat, L.feat) * 4
+            if c < best:
+                best, bid = c, i
+        return bid
+
+    def step(self, frame, dets, feats=None):
+        """dets: list of (x1,y1,x2,y2,conf).
+        returns list of (frame, id, (x1,y1,x2,y2), conf). Usually frame == current frame; when a track is
+        confirmed, its first few (tentative) frames are returned too (backfill), so results files are complete."""
+        P = self.p
+        feats = feats if feats is not None else [None] * len(dets)
+        for t in self.active + self.tentative:
+            t.kf.predict()
+        hi = [j for j, d in enumerate(dets) if d[4] >= P["high"]]
+        lo = [j for j, d in enumerate(dets) if P["low"] <= d[4] < P["high"]]
+        # 1) active tracks <- confident detections
+        m, ut, ud = match(self.active, [dets[j] for j in hi], P["gate"])
+        used = set()
+        for i, k in m:
+            self._hit(self.active[i], dets[hi[k]], feats[hi[k]], frame); used.add(hi[k])
+        rest = [self.active[i] for i in ut]
+        # 2) remaining active tracks <- weak detections
+        m2, ut2, _ = match(rest, [dets[j] for j in lo], P["gate"])
+        for i, k in m2:
+            self._hit(rest[i], dets[lo[k]], feats[lo[k]], frame); used.add(lo[k])
+        for i in ut2:
+            rest[i].miss += 1
+        # 3) tentative tracks <- leftover confident detections
+        left = [j for j in hi if j not in used]
+        m3, ut3, ud3 = match(self.tentative, [dets[j] for j in left], P["gate"])
+        for i, k in m3:
+            self._hit(self.tentative[i], dets[left[k]], feats[left[k]], frame)
+        self.tentative = [t for i, t in enumerate(self.tentative) if i not in set(ut3)]
+        for k in ud3:
+            d = dets[left[k]]
+            if d[4] >= P["new"]:
+                self.tentative.append(Track(d[:4], d[4], frame, feats[left[k]]))
+        # promote confirmed tentatives
+        backfill = []
+        for t in list(self.tentative):
+            if t.hits >= P["confirm"]:
+                i = self._assign_id(t, frame)
+                if i is not None:
+                    t.id = i; self.lost.pop(i, None); self.active.append(t); self.tentative.remove(t)
+                    backfill += [(f, i, b, c) for f, b, c in t.hist if f != frame and self.backfill]
+                    t.hist = []
+        # retire long-missing actives to the lost list
+        for t in list(self.active):
+            if t.miss > P["coast"]:
+                self.active.remove(t); self.lost[t.id] = t
+        out = list(backfill)
+        for t in self.active:
+            if t.miss == 0:
+                out.append((frame, t.id, t.box(), t.conf))
+            else:  # coasting: predicted box, lower confidence
+                out.append((frame, t.id, t.box(), t.conf * 0.6 ** t.miss))
+        return out
+
+    def predictions(self, max_lost_age=30):
+        """where we expect each drone in the next frame: [(id or None, box, frames_missed)]"""
+        out = [(t.id, t.peek(), t.miss) for t in self.active]
+        return out
+
+    def future_paths(self, steps=15):
+        """straight-line guess of where each confirmed drone goes next: [(id, [(x, y), ...])], from the Kalman velocity"""
+        out = []
+        for t in self.active:
+            if t.id is None:
+                continue
+            cx, cy, _, _, vx, vy = t.kf.x[:6]
+            out.append((t.id, [(cx + vx * k, cy + vy * k) for k in range(steps + 1)]))
+        return out
+
+    def _hit(self, t, d, feat, frame):
+        t.kf.update(xyxy_to_cxcywh(d[:4])); t.hits += 1; t.miss = 0; t.conf = d[4]; t.last = frame
+        if t.id is None:
+            t.hist.append((frame, tuple(d[:4]), d[4]))
+        a = (d[2] - d[0]) / max(d[3] - d[1], 1); t.aspect = 0.9 * t.aspect + 0.1 * a
+        if feat is not None:
+            t.feat = feat if t.feat is None else 0.9 * t.feat + 0.1 * feat
+
+
+def feat_dist(a, b):
+    """Bhattacharyya-like distance between normalised histograms, 0 = same, 1 = different"""
+    return float(np.sqrt(max(0.0, 1 - np.sum(np.sqrt(a * b)))))
+
+
+def appearance(frame_bgr, box):
+    """hue/sat histogram + brightness histogram + contrast to surroundings"""
+    import cv2
+    H, W = frame_bgr.shape[:2]
+    x1, y1, x2, y2 = [int(round(v)) for v in box]
+    x1, y1, x2, y2 = max(0, x1), max(0, y1), min(W, x2), min(H, y2)
+    if x2 - x1 < 2 or y2 - y1 < 2:
+        return None
+    crop = frame_bgr[y1:y2, x1:x2]
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    h1 = cv2.calcHist([hsv], [0, 1], None, [8, 4], [0, 180, 0, 256]).ravel()
+    h2 = cv2.calcHist([hsv], [2], None, [8], [0, 256]).ravel()
+    v = np.concatenate([h1 / max(h1.sum(), 1), h2 / max(h2.sum(), 1)]) / 2
+    return v

@@ -1,0 +1,95 @@
+diff --git a/tracker.py b/tracker.py
+index 2bd214d..209841f 100644
+--- a/tracker.py
++++ b/tracker.py
+@@ -6,6 +6,10 @@ from scipy.optimize import linear_sum_assignment
+ 
+ REACQ_GAP = 30     # frames: how long after losing a drone we may take it back under its own id
+ REACQ_CONF = 0.20  # min box confidence for re-acquisition
++import os
++REACQ_VEL = float(os.environ.get("REACQ_VEL", "0"))  # >0: also accept the spot the drone would reach if it kept its velocity (damped)
++REACQ_ACTIVE = os.environ.get("REACQ_ACTIVE", "0") == "1"  # also take back a drone whose track is still coasting (prediction ran off)
++HANDOVER = int(os.environ.get("HANDOVER", "0"))  # >0: a newly confirmed drone takes over the id of a track that has been coasting >= this many frames (same size)
+ REACQ_DIST = 1.5   # max distance from where it was last seen, in drone sizes (grows 15%/frame of gap)
+ 
+ 
+@@ -44,7 +48,7 @@ class Track:
+         self.conf = conf; self.last = frame; self.id = None; self.feat = feat
+         self.hist = [(frame, tuple(box[:4]), conf)]  # kept while tentative, written out on confirmation
+         self.aspect = (box[2] - box[0]) / max(box[3] - box[1], 1)
+-        self.last_obs = xyxy_to_cxcywh(box)
++        self.last_obs = xyxy_to_cxcywh(box); self.vel = (0.0, 0.0)
+ 
+     def peek(self):
+         """predicted box for the NEXT frame, without changing the filter"""
+@@ -106,6 +110,10 @@ class TwoDroneTracker:
+             else:
+                 L = self.lost[i]; gap = max(frame - L.last, 1)
+                 lx, ly = L.kf.x[0], L.kf.x[1]  # last position (frozen when lost)
++                if REACQ_VEL > 0:  # closer of: where it was last seen / where it would be if it kept flying
++                    g2 = frame - L.last; ex, ey = L.last_obs[0] + L.vel[0] * g2 * REACQ_VEL, L.last_obs[1] + L.vel[1] * g2 * REACQ_VEL
++                    if np.hypot(t.kf.x[0] - ex, t.kf.x[1] - ey) < np.hypot(t.kf.x[0] - lx, t.kf.x[1] - ly):
++                        lx, ly = ex, ey
+                 nx, ny = t.kf.x[0], t.kf.x[1]
+                 c = self.w_pos * np.hypot(nx - lx, ny - ly) / np.hypot(self.W, self.H) * 4
+                 c += 0.5 * abs(np.log(max(t.aspect, .1) / max(L.aspect, .1)))
+@@ -140,9 +148,11 @@ class TwoDroneTracker:
+         # 2b) RE-ACQUIRE: a drone lost a moment ago (e.g. it stopped / turned and the prediction ran off)
+         #     comes back under its own id straight away from a moderately confident box near where it was last seen,
+         #     instead of waiting for 3 confident frames as a brand-new track
+-        if REACQ_GAP > 0 and self.lost:
++        if REACQ_GAP > 0 and (self.lost or REACQ_ACTIVE):
+             cand = [j for j, d in enumerate(dets) if j not in used and d[4] >= REACQ_CONF]
+             L = [(i, t) for i, t in self.lost.items() if 0 < frame - t.last <= REACQ_GAP and i not in {a.id for a in self.active}]
++            if REACQ_ACTIVE:
++                L += [(None, t) for t in self.active if t.last < frame]
+             if cand and L:
+                 C = np.full((len(L), len(cand)), 1e6)
+                 for r, (i, t) in enumerate(L):
+@@ -150,16 +160,23 @@ class TwoDroneTracker:
+                     for c_, j in enumerate(cand):
+                         dx, dy, dw, dh = xyxy_to_cxcywh(dets[j][:4])
+                         dist = np.hypot(dx - lx, dy - ly) / (s * (1 + 0.15 * gap))
++                        if REACQ_VEL > 0:
++                            ex, ey = lx + t.vel[0] * gap * REACQ_VEL, ly + t.vel[1] * gap * REACQ_VEL
++                            dist = min(dist, np.hypot(dx - ex, dy - ey) / (s * (1 + 0.15 * gap)))
+                         size = abs(np.log(max(dw * dh, 1) / max(lw * lh, 1)))
+                         if dist < REACQ_DIST and size < 1.0:
+                             C[r, c_] = dist + 0.5 * size
+                 rr, cc = linear_sum_assignment(C)
+                 for r, c_ in zip(rr, cc):
+-                    if C[r, c_] >= 1e5 or len(self.active) >= self.max_ids:
++                    if C[r, c_] >= 1e5:
+                         continue
+                     i, t = L[r]; j = cand[c_]; d = dets[j]
++                    if i is not None and len(self.active) >= self.max_ids:
++                        continue
+                     t.kf = KF(xyxy_to_cxcywh(d[:4])); t.miss = 0; t.hits += 1; t.conf = d[4]; t.last = frame
+-                    t.last_obs = xyxy_to_cxcywh(d[:4]); self.lost.pop(i); self.active.append(t); used.add(j)
++                    t.last_obs = xyxy_to_cxcywh(d[:4]); used.add(j)
++                    if i is not None:
++                        self.lost.pop(i); self.active.append(t)
+         # 3) tentative tracks <- leftover confident detections
+         left = [j for j in hi if j not in used]
+         m3, ut3, ud3 = match(self.tentative, [dets[j] for j in left], P["gate"])
+@@ -174,6 +191,11 @@ class TwoDroneTracker:
+         backfill = []
+         for t in list(self.tentative):
+             if t.hits >= P["confirm"]:
++                if HANDOVER > 0:
++                    co = [a for a in self.active if a.id is not None and a.miss >= HANDOVER
++                          and abs(np.log(max(t.kf.x[2] * t.kf.x[3], 1) / max(a.last_obs[2] * a.last_obs[3], 1))) < 1.0]
++                    if co:
++                        a = max(co, key=lambda a: a.miss); self.active.remove(a); self.lost[a.id] = a
+                 i = self._assign_id(t, frame)
+                 if i is not None:
+                     t.id = i; self.lost.pop(i, None); self.active.append(t); self.tentative.remove(t)
+@@ -216,7 +238,7 @@ class TwoDroneTracker:
+         return out
+ 
+     def _hit(self, t, d, feat, frame):
+-        t.last_obs = xyxy_to_cxcywh(d[:4]); t.kf.update(xyxy_to_cxcywh(d[:4])); t.hits += 1; t.miss = 0; t.conf = d[4]; t.last = frame
++        t.last_obs = xyxy_to_cxcywh(d[:4]); t.kf.update(xyxy_to_cxcywh(d[:4])); t.vel = (t.kf.x[4], t.kf.x[5]); t.hits += 1; t.miss = 0; t.conf = d[4]; t.last = frame
+         if t.id is None:
+             t.hist.append((frame, tuple(d[:4]), d[4]))
+         a = (d[2] - d[0]) / max(d[3] - d[1], 1); t.aspect = 0.9 * t.aspect + 0.1 * a

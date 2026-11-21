@@ -1,0 +1,7 @@
+# Revised mix (not trained yet): + MBAOD UAV positives, + motion-blur copies, airplane negatives removed.
+path: drone_data
+train: train_v2_1280.txt
+val:
+  - antiuav/val/images
+names:
+  0: drone

@@ -1,0 +1,6 @@
+# hackathon_dataset only (colour model A, quick first test). paths relative to code/
+path: drone_data
+train: train/images
+val: val/images
+names:
+  0: drone
