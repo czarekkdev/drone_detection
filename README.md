@@ -129,6 +129,38 @@ Overview (3 machines: Mac, a Linux PC for compiling, the Pi):
 You need: the SkyGuard model (`pretrained/drone-detection-yolov11/best.pt`), the crop model (release v0.883 asset,
 `ft_1280_ep1_crop.pt`, here called `runs/ft_1280/weights/epoch0.pt`), `test_sample_clean/`, and the team's `evaluation.py`.
 
+### On Windows: do steps 1-3 inside WSL2
+
+On Windows everything up to the .hef happens in one place, **WSL2 with Ubuntu 22.04** (it counts as the x86 Linux PC):
+
+    wsl --install -d Ubuntu-22.04        # in PowerShell as admin, then restart and open "Ubuntu 22.04"
+
+Inside Ubuntu, your Windows drive is `/mnt/c`, so a folder `C:\Users\<you>\drone detecting` is
+`"/mnt/c/Users/<you>/drone detecting"`. Then:
+
+    sudo apt update && sudo apt install -y python3.10 python3.10-venv python3.10-dev graphviz graphviz-dev git libgl1
+    git clone https://github.com/czarekkdev/drone_detection && cd drone_detection
+    D="/mnt/c/Users/<you>/drone detecting"         # folder with pretrained/, the crop model, test_sample_clean/
+
+    # step 1 (export) + step 2 (calibration) in their own environment
+    python3.10 -m venv ~/export && source ~/export/bin/activate
+    pip install ultralytics onnx onnxslim onnxruntime
+    python -c "from ultralytics import YOLO; YOLO('$D/pretrained/drone-detection-yolov11/best.pt').export(format='onnx', imgsz=640, opset=11)"
+    python -c "from ultralytics import YOLO; YOLO('$D/code/runs/ft_1280/weights/epoch0.pt').export(format='onnx', imgsz=640, opset=11)"
+    python make_calib.py --videos "$D/test_sample_clean" --out calib --n 600
+    cp "$D/pretrained/drone-detection-yolov11/best.onnx" "$D/code/runs/ft_1280/weights/epoch0.onnx" .
+    deactivate
+
+    # step 3 (compile): put the Hailo .whl files you downloaded (Windows Downloads = /mnt/c/Users/<you>/Downloads) here
+    python3.10 -m venv ~/hailo && source ~/hailo/bin/activate
+    pip install /mnt/c/Users/<you>/Downloads/hailo_dataflow_compiler-*.whl /mnt/c/Users/<you>/Downloads/hailo_model_zoo-*.whl
+    hailomz compile yolov11n --ckpt best.onnx   --hw-arch hailo8 --calib-path calib/ --classes 1 && mv yolov11n.hef skyguard.hef
+    hailomz compile yolov11n --ckpt epoch0.onnx --hw-arch hailo8 --calib-path calib/ --classes 1 && mv yolov11n.hef crop_640.hef
+    cp skyguard.hef crop_640.hef "$D/"             # now they are in the Windows folder too
+
+Version matching (below, step 3) applies the same way. Then copy the two `.hef` files, `test_sample_clean/` and `evaluation.py`
+to the Pi (USB stick, or `scp` from PowerShell) and continue with step 4. The Mac and Windows steps make identical files.
+
 ### 1. Export to ONNX (Mac)
 
 The ONNX tools (onnxruntime) have no build for Python 3.15 yet, so use a separate **Python 3.12** environment just for this:
