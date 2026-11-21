@@ -57,7 +57,11 @@ class Booster:
 
     def reset(self):
         """call at the start of each video"""
-        self.LM = LY.LayerMaker(width=self.lw, fast_align=self.fast_align); self.CS = Consensus(near=60 * self.lw / 960)
+        long_gap = max(1, round(10 / self.layer_every))
+        bg_alpha = 1.0 - (1.0 - 0.05) ** self.layer_every
+        self.LM = LY.LayerMaker(width=self.lw, long_gap=long_gap, bg_alpha=bg_alpha,
+                                fast_align=self.fast_align)
+        self.CS = Consensus(near=60 * self.lw / 960)
         self.krun = {}; self.prev_bl = []
         self.frame_no = 0
         self.t = {"crops": [], "layers": [], "logic": []}
