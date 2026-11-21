@@ -12,6 +12,9 @@ HANDOVER = True    # a newly confirmed track takes over the number of a same-siz
                    # Anti-UAV 67 videos: ID switches 63 -> 53; practice videos unchanged
 INSIDE = 0.7       # a box lying this much inside a tracked drone's box can't start a new track (part of the same drone)
 MERGE = True       # two tracks on the same drone (one box INSIDE the other): keep the one seen longer, drop the other
+MIN_TRACK = 12     # result files: drop every appearance of a drone (same number, gaps <= 5 frames) shorter than this
+                   # many frames (0.4 s). Real setup: 0.8848 -> 0.8882; Anti-UAV ID switches 35 -> 21. 30 (1 s) is worse.
+                   # Applied when the file is written (needs to see the whole appearance); 0 = off
 SAME_SPOT = 0.5    # two output boxes whose centres are closer than this x the bigger box's size = same spot: show one
 MIN_SHOW = 0.05    # don't output boxes below this confidence (tracking continues underneath). Practice 0.8832 -> 0.8848,
                    # Anti-UAV 0.631 -> 0.635 (not tuned there); 0.1+ is worse (hides correct faint / coasting boxes)
@@ -302,13 +305,29 @@ def dedupe(rows):
 
 
 def dedupe_lines(lines):
-    """same for result-file lines 'frame,id,left,top,w,h,conf', sorted by frame then id"""
+    """final step for result-file lines 'frame,id,left,top,w,h,conf': one box per (frame, id), short appearances
+    (MIN_TRACK) dropped, sorted by frame then id"""
     best = {}
     for l in lines:
         v = l.split(","); k = (int(v[0]), int(v[1]))
         if k not in best or float(v[6]) > float(best[k].split(",")[6]):
             best[k] = l
-    return [best[k] for k in sorted(best)]
+    keys = sorted(best)
+    if MIN_TRACK:
+        keep = set(); by = {}
+        for f, i in keys:
+            by.setdefault(i, []).append(f)
+        for i, fs in by.items():
+            run = [fs[0]]
+            for f in fs[1:] + [None]:
+                if f is not None and f - run[-1] <= 5:
+                    run.append(f); continue
+                if run[-1] - run[0] + 1 >= MIN_TRACK:
+                    keep.update((g, i) for g in run)
+                if f is not None:
+                    run = [f]
+        keys = [k for k in keys if k in keep]
+    return [best[k] for k in keys]
 
 
 def feat_dist(a, b):

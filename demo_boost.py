@@ -13,6 +13,8 @@ import argparse, os, time
 import cv2, numpy as np, torch
 from ultralytics import YOLO
 from tracker import TwoDroneTracker
+import tracker as TRK
+SEEN, LAST = {}, {}  # per drone number: frames in its current appearance, last frame seen
 import layers as LY
 from consensus import Consensus, view as cview
 
@@ -187,8 +189,10 @@ while True:
             for i, pts in TRAIL.items():
                 for k in range(1, len(pts)):
                     cv2.line(img, pts[k - 1], pts[k], COL.get(i, (0, 255, 0)), 2)
-        for f, i, (x1, y1, x2, y2), c in out:
-            if f == n and c >= a.show_min:
+        for f, i, (x1, y1, x2, y2), c in out:  # on screen: a drone is drawn once it has been there MIN_TRACK frames
+            if f == n:
+                SEEN[i] = SEEN.get(i, 0) + 1 if LAST.get(i, -99) >= n - 5 else 1; LAST[i] = n
+            if f == n and c >= a.show_min and SEEN.get(i, 0) >= TRK.MIN_TRACK:
                 col = COL.get(i, (0, 255, 0))
                 cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), col, 3)
                 cv2.putText(img, f"drone {i} {c:.2f}", (int(x1), max(20, int(y1) - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, col, 2)
