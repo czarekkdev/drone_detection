@@ -129,11 +129,19 @@ def view(L, key, size):
 
 
 def grid(L, cam, size):
-    """camera + all 6 layers in a 4x2 grid (last tile: camera in black & white)"""
-    W, H = size; tw, th = W // 4, H // 2
-    tiles = [cv2.resize(cam, (tw, th))] + [view(L, k, (tw, th)) for k in ORDER]
-    tiles.append(cv2.cvtColor(cv2.cvtColor(tiles[0], cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR))
-    for t, name in zip(tiles, ("camera",) + ORDER + ("black & white",)):
-        cv2.putText(t, name, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-    g = cv2.vconcat([cv2.hconcat(tiles[:4]), cv2.hconcat(tiles[4:])])
-    return cv2.resize(g, size)
+    """Camera plus five colorized maps; omit the two grayscale-only panels."""
+    W, H = size
+    keys = ("short", "long", "bg", "track", "shape")
+    names = ("camera",) + keys
+    tw = W // 3
+    th = max(1, round(tw * H / W))  # keep every tile at the source aspect ratio
+    top = max(0, (H - 2 * th) // 2)
+    canvas = np.zeros((H, W, 3), dtype=np.uint8)
+    for i, (name, key) in enumerate(zip(names, (None,) + keys)):
+        x0, x1 = i % 3 * W // 3, (i % 3 + 1) * W // 3
+        y0, y1 = top + (i // 3) * th, top + (i // 3 + 1) * th
+        tile = cv2.resize(cam if key is None else view(L, key, (x1 - x0, y1 - y0)),
+                          (x1 - x0, y1 - y0))
+        cv2.putText(tile, name, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+        canvas[y0:y1, x0:x1] = tile
+    return canvas

@@ -265,8 +265,8 @@ also reports detector-only AP50, AP30 and the best-F1 confidence.
 |---|---|---|
 | Camera | `1` in both demos | Source video with current track boxes, IDs and optional trails. |
 | Motion difference, mask and four-panel view | `2`, `3`, `4` in the basic demo | Legacy motion response, its binary mask, or camera, response, mask and background together. |
-| Individual layer views | `5`, `6`, `7`, `8`, `9`, `b` in the basic demo | Short, long, background, track prior, previous grayscale and local contrast, respectively. |
-| All layers | `0` in both demos | A 4 × 2 grid of the camera, all six maps and a grayscale camera panel. |
+| Individual layer views | `5`, `6`, `7`, `8`, `b` in the basic demo | Short, long, background, track prior and local contrast. The grayscale previous-frame panel is hidden in the demo. |
+| Colorized layer grid | `0` in both demos | Camera plus short, long, background, track and shape maps. Grayscale-only panels are omitted from the display; the underlying layer data and tracking are unchanged. |
 | Consensus | `c` in the boosted demo | The white consensus mask with filtered blobs outlined in green. |
 | Camera + consensus | `o` or `--view overlay` in the boosted demo | The consensus mask tinted red over the original video. |
 
@@ -323,7 +323,7 @@ Demo with switchable views:
 Add `--clean` to hide the status text and answer boxes (nice for showing people).
 
 Keys: 1 camera, 2 difference, 3 motion mask, 4 four-way view, 5 short diff, 6 long diff, 7 background diff,
-8 tracker map, 9 previous frame, b brightness shape, 0 all layers, t trajectory, m motion crops, p trajectory crops,
+8 tracker map, b brightness shape, 0 colorized layer grid (grayscale panels hidden), t trajectory, m motion crops, p trajectory crops,
 o helper boxes, space pause, q quit.
 
 Score all practice videos:
@@ -339,7 +339,7 @@ Best setup (original SkyGuard on the full frame, fine-tuned 1280 model `ft_1280 
       --no-motion --layer-width 480 --verify --keeper2 --agree-boost 0.1 --boost-to 0.65 --crop-scale 2
     python eval_track.py --gt ../test_sample_clean --pred preds/boost
 
-Live demo of the best setup (keys: 1 camera, c white-shape view, 0 all layers, b booster on/off, k keeper on/off, t trails, space pause, q quit;
+Live demo of the best setup (keys: 1 camera, c white-shape view, 0 colorized layer grid, b booster on/off, k keeper on/off, t trails, space pause, q quit;
 yellow box = booster confirmed a faint detection, dashed box = keeper held the track):
 
     python demo_boost.py                         # hard practice video

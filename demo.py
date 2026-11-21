@@ -3,9 +3,9 @@
   python demo.py 0 --show            (live webcam / camera 0)
 Keys in the window:
   1 camera view   2 difference image   3 motion mask   4 four-way: camera, difference, motion mask, background diff
-  5 short diff   6 long diff   7 background diff   8 tracker map   9 previous frame   b brightness shape
-  0 grid of camera + all 6 layers
-  (layers 5-0 are the extra inputs for the 'B' model; they warm up for ~10 frames after you first switch to them)
+  5 short diff   6 long diff   7 background diff   8 tracker map   b brightness shape
+  0 camera + colorized motion/shape maps (grayscale-only panels hidden)
+  (layer views warm up for ~10 frames after you first switch to them)
   t trajectory on/off (trail behind + predicted path ahead)   m motion on/off   p prediction crops on/off   o helper boxes on/off (off at start)   space pause   q quit
 Colours: orange/blue = drone 1/2 (final output), thin white = correct answer (gt, if the video has one),
   green squares = crops checked at a predicted spot, cyan squares = crops checked at a motion spot,
@@ -48,8 +48,8 @@ COL = {1: (0, 165, 255), 2: (255, 120, 0)}
 view, overlays, paused = a.view, False, False
 lines, n, t0 = [], 0, time.time()
 VIEWS = {1: "camera", 2: "difference image", 3: "motion mask", 4: "camera | difference / mask | background",
-         5: "short diff", 6: "long diff", 7: "background diff", 8: "tracker map", 9: "previous frame", 10: "brightness shape", 0: "all layers"}
-LAYER_KEY = {5: "short", 6: "long", 7: "bg", 8: "track", 9: "prev", 10: "shape"}
+         5: "short diff", 6: "long diff", 7: "background diff", 8: "tracker map", 10: "brightness shape", 0: "colorized motion/shape maps"}
+LAYER_KEY = {5: "short", 6: "long", 7: "bg", 8: "track", 10: "shape"}
 LM, L = None, None
 traj, TRAIL = True, {}  # TRAIL: id -> last 30 centres
 

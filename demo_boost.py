@@ -3,7 +3,7 @@
   + consensus white-shape layer (480 px): verifier, agreement BOOST, motion-consistent KEEPER  +  tracker
   python demo_boost.py                                  (hard practice video, window on)
   python demo_boost.py --video path/to/any.mp4          (any video; --video 0 = camera)
-Keys:  1 camera   o camera + shape layer on top (red)   c consensus / white-shape view   0 all layers   t trajectory on/off
+Keys:  1 camera   o camera + shape layer on top (red)   c consensus / white-shape view   0 colorized layer grid   t trajectory on/off
        b booster on/off   k keeper on/off   space pause   q quit
 Colours: orange/blue = drone 1/2 (final output), thin white = correct answer (practice videos only),
   YELLOW box = a faint detection that the booster raised (white blob at the same place),
@@ -29,7 +29,7 @@ p.add_argument("--out", default=os.path.join(HERE, "demo_out"))
 p.add_argument("--layer-width", type=int, default=480)
 p.add_argument("--one-model", action="store_true", help="drop the second AI (fine-tuned crop model); crops use the main model")
 p.add_argument("--view", default="camera", choices=["camera", "overlay", "shapes", "layers"],
-               help="start view (keys: 1 camera, o camera + shape layer on top, c shapes only, 0 all layers)")
+               help="start view (keys: 1 camera, o camera + shape layer on top, c shapes only, 0 colorized layer grid)")
 p.add_argument("--show-min", type=float, default=0.3, help="a NEW drone is drawn only at this confidence; once on screen it stays down to tracker.MIN_SHOW "
                "(0.05), so it doesn't flicker. Screen only, the saved .txt is not affected")
 p.add_argument("--boost-lo", type=float, default=0.10); p.add_argument("--boost-to", type=float, default=0.65)
