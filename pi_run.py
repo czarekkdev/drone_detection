@@ -170,6 +170,8 @@ if __name__ == "__main__":
                    help="consensus cues: comma-separated motion,bg,shape (default: all three)")
     p.add_argument("--layer-every", type=int, default=1,
                    help="compute layer cues once every N frames; detections/tracking still run each frame")
+    p.add_argument("--fast-align", action="store_true",
+                   help="use translation-only phase correlation instead of CPU feature tracking and homography")
     p.add_argument("--device", default=None)
     p.add_argument("--dets", default="", help="folder of cached whole-frame detections (run_video.py output) instead of the model")
     p.add_argument("--simple", action="store_true", help="old pipeline: no shape layer, plain 1x crops with the whole-frame model")
@@ -206,7 +208,8 @@ if __name__ == "__main__":
         booster = Booster(cb, crop_scale=1.0, crop_imgsz=320, use_layers=False)
     else:
         booster = Booster(cb, crop_scale=2.0, crop_imgsz=320, layer_width=a.layer_width, cmc=a.cmc,
-                          use_layers=not a.no_layers, layers=layer_names, layer_every=a.layer_every)
+                          use_layers=not a.no_layers, layers=layer_names, layer_every=a.layer_every,
+                          fast_align=a.fast_align)
     os.makedirs(a.out, exist_ok=True)
     if os.path.isdir(a.source):
         for v in sorted(glob.glob(os.path.join(a.source, "*", "video.mp4"))):

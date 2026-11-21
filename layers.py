@@ -25,8 +25,9 @@ def sane(H, max_scale=0.05, max_persp=2e-4):
 
 
 class LayerMaker:
-    def __init__(self, width=960, long_gap=10, bg_alpha=0.05, gain=32.0):
+    def __init__(self, width=960, long_gap=10, bg_alpha=0.05, gain=32.0, fast_align=False):
         self.width, self.long_gap, self.alpha, self.gain = width, long_gap, bg_alpha, gain
+        self.fast_align = fast_align
         self.grays, self.Hs = [], []  # Hs[i]: homography grays[i] -> grays[i+1]
         self.bg = None; self.s = None; self.prev_feats = None
         self.timing = {k: 0.0 for k in ("gray", "features", "alignment", "flow", "homography", "phase", "warp", "normalize", "shape", "track")}
@@ -35,7 +36,7 @@ class LayerMaker:
         self.timing[key] += time.perf_counter() - started
 
     def _h(self, src, dst, pts):
-        if pts is not None and len(pts) >= 20:
+        if not self.fast_align and pts is not None and len(pts) >= 20:
             started = time.perf_counter()
             nxt, st, _ = cv2.calcOpticalFlowPyrLK(src, dst, pts, None, winSize=(21, 21), maxLevel=3)
             self._timed("flow", started)
@@ -94,7 +95,10 @@ class LayerMaker:
                 self._timed("alignment", started)
             self.grays.append(g)
             started = time.perf_counter()
-            self.prev_feats = cv2.goodFeaturesToTrack(g, 800, 0.01, 8)
+            if self.fast_align:
+                self.prev_feats = None
+            else:
+                self.prev_feats = cv2.goodFeaturesToTrack(g, 800, 0.01, 8)
             self._timed("features", started)
             keep = self.long_gap + 1 if want_motion else 2
             self.grays = self.grays[-keep:]

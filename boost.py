@@ -42,7 +42,7 @@ class Booster:
     def __init__(self, crop_backend, crop=320, crop_imgsz=320, crop_scale=2.0, layer_width=480,
                  verify=True, verify_below=0.5, verify_mult=0.3, agree_lo=0.1, boost_to=0.65,
                  keeper2=True, keeper_conf=0.25, keeper_max=5, use_layers=True, use_crops=True, cmc=False,
-                 layers=("motion", "bg", "shape"), layer_every=1):
+                 layers=("motion", "bg", "shape"), layer_every=1, fast_align=False):
         self.cb = crop_backend; self.crop, self.crop_imgsz, self.k = crop, crop_imgsz, crop_scale
         self.verify, self.vb, self.vm = verify, verify_below, verify_mult
         self.lo, self.hi = agree_lo, boost_to
@@ -51,12 +51,13 @@ class Booster:
         self.cmc = cmc  # camera-motion compensation: shift the tracker with the camera (measured in layers.py)
         self.layers = tuple(layers)
         self.layer_every = max(1, int(layer_every)); self.frame_no = 0
+        self.fast_align = fast_align
         self.lw = layer_width
         self.reset()
 
     def reset(self):
         """call at the start of each video"""
-        self.LM = LY.LayerMaker(width=self.lw); self.CS = Consensus(near=60 * self.lw / 960)
+        self.LM = LY.LayerMaker(width=self.lw, fast_align=self.fast_align); self.CS = Consensus(near=60 * self.lw / 960)
         self.krun = {}; self.prev_bl = []
         self.frame_no = 0
         self.t = {"crops": [], "layers": [], "logic": []}

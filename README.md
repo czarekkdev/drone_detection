@@ -661,6 +661,7 @@ Use `--no-layers` to measure the two-model crop pipeline without layer processin
 uses the separate crop HEF and 2x crops.
 For a performance/accuracy compromise, `--layer-every 2` computes the selected cues every other frame while
 the whole-frame model, crop pass, and tracker still run on every frame. `--layer-width 320` further reduces CPU work.
+Add `--fast-align` to replace CPU corner tracking and homography fitting with faster translation-only phase correlation.
 
     python pi_run.py test_sample_clean $H --no-layers --out results_two_model_no_layers
     python pi_run.py test_sample_clean $H --layers motion --out results_motion
