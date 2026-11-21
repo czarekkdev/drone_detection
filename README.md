@@ -1,21 +1,289 @@
 # Drone detection and tracking
 
 Finds and tracks up to 2 drones in 1920x1080 video and writes one result file per video:
-`frame,id,left,top,width,height,confidence` (frames start at 1, ids are 1 or 2 and stay the same when a drone leaves and comes back).
+`frame,id,left,top,width,height,confidence` (frames start at 1, IDs are 1 or 2 and can be recovered when a drone leaves and returns).
 Target: real time (50 fps or more) on a Raspberry Pi with the AI HAT+ (Hailo-8, 26 TOPS).
 
 ## How it works
 
-1. **Detector**: YOLO11n ([SkyGuardAI/drone-detection-yolov11](https://huggingface.co/SkyGuardAI/drone-detection-yolov11), MIT), being fine-tuned on our data.
-2. **Tracker** (`tracker.py`): Kalman filter + two-threshold matching, at most 2 ids, re-identifies a returning drone by appearance (colour/brightness histogram, shape) and position. Quick re-acquisition: a drone lost less than 30 frames ago (for example after a sudden stop, when the prediction runs ahead) gets its own id back at once from a box with confidence 0.2 or more near where it was last seen and of similar size, instead of waiting 3 frames as a new track.
-3. **Trajectory crops** (`stack.py`): where the tracker expects a drone, a zoomed crop is checked again, which finds small drones the full-frame pass misses.
-4. **Extra input layers** (`layers.py`, for the multi-channel model B, not trained yet): short / long / background difference (camera-shake compensated), tracker map, previous frame, brightness shape.
-5. **Motion detector** (`motion_live.py`): kept for the views; motion crops are off by default (they did not improve the score).
-6. **Combined shape layer** (`consensus.py`, best setup): a pixel counts only where at least 2 of motion / background difference / brightness shape agree (1 is enough near where the tracker expects a drone), cleaned into at most 5 blobs per frame. Used as a second opinion, never to make boxes on its own:
-   - **booster**: a faint detection (confidence 0.10 to 0.30) is trusted (raised to 0.65) when a white blob of similar size sits at the same spot;
-   - **keeper**: a track is held through a detector gap (max 5 frames) only if a blob near the prediction moves in the same direction (within 45°) and at the same speed (0.5 to 1.5x) as the drone;
-   - **verifier**: weak boxes with no layer support count less.
-   Costs about 8 ms per frame on the CPU at 480 px.
+The recommended two-model pipeline detects drones across the whole frame, checks
+selected crops around predicted tracks, and uses temporal image evidence to refine
+the candidates before tracking. The tracker feeds its next-frame predictions back
+to the crop and image-layer stages.
+
+- [Frame flow and models](#frame-flow-and-models)
+- [Six image layers](#six-image-layers)
+- [Consensus and score refinement](#consensus-and-score-refinement)
+- [Tracking and result files](#tracking-and-result-files)
+- [Entry points and demo views](#entry-points-and-demo-views)
+
+### Frame flow and models
+
+```mermaid
+flowchart LR
+    Frame["Decoded video frame"] --> Full["Full-frame SkyGuard"]
+    Full --> Crop["Trajectory crops and box merge"]
+    Frame --> Crop
+    Frame --> Layers["Six derived image maps"]
+    Layers --> Consensus["Consensus mask and blobs"]
+    Crop --> Refine["Verify, boost and keep"]
+    Consensus --> Refine
+    Refine --> Tracker["TwoDroneTracker"]
+    Tracker --> Export["Result filtering and export"]
+    Tracker -.-> Prior["Next-frame predictions"]
+    Prior -.-> Crop
+    Prior -.-> Layers
+    Prior -.-> Refine
+```
+
+1. **Whole-frame detection.** The recommended run uses the original SkyGuard
+   checkpoint at `imgsz=1280` with a confidence floor of `0.01`.
+   [`run_video.py`](run_video.py) can cache these candidates by frame, so different
+   tracking runs can reuse the same detector output. It defaults to `imgsz=640`
+   on its own. Use `--imgsz 1280 --keep drone` for the documented cache.
+2. **Trajectory crops.** For each active track, the pipeline checks whether a
+   candidate already overlaps its predicted box at IoU greater than `0.20`
+   with a score at least as high as the tracker's low threshold (`0.05`).
+   Otherwise it takes a 320 px crop centered near the prediction and fits it
+   inside the source frame. The boosted preset enlarges it 2× with cubic
+   interpolation and runs the fine-tuned checkpoint at `imgsz=640` with a
+   `0.05` score floor. It divides the crop coordinates by two and adds the crop
+   origin to map boxes back to source pixels. A crop box that overlaps an
+   existing candidate at IoU greater than `0.30` replaces it if it scores higher.
+   A box without such an overlap is appended.
+3. **Temporal refinement.** The six derived maps are computed at a smaller
+   working resolution. The consensus mask and selected blobs help the
+   verifier, booster and keeper decide which candidates to pass to the tracker.
+4. **Tracking.** The tracker advances in frame order. It associates candidates
+   with active tracks, confirms new tracks and produces boxes with IDs and
+   confidence. Each video starts with fresh tracker, layer and consensus state.
+
+| Checkpoint | Role | Expected path |
+|---|---|---|
+| SkyGuard YOLO11n | Whole-frame detection. The basic pipeline also reuses it for crops. | `../pretrained/drone-detection-yolov11/best.pt` |
+| Fine-tuned crop checkpoint | Second-pass detection on enlarged trajectory crops. The v0.883 release asset is `ft_1280_ep1_crop.pt`. | `runs/ft_1280/weights/epoch0.pt` |
+
+Both supplied checkpoints take ordinary color images and predict the `drone`
+class. The six derived maps are computed alongside inference and used after
+it. [SkyGuard model card](https://huggingface.co/SkyGuardAI/drone-detection-yolov11)
+· [v0.883 release](https://github.com/czarekkdev/drone_detection/releases/tag/v0.883)
+
+<details>
+<summary>YOLO11n module map for both checkpoints</summary>
+
+The module numbers below come from the two supplied PyTorch checkpoints.
+The backbone extracts features, the neck combines features from different
+scales, and the head predicts boxes and class scores.
+
+| Modules | Blocks | Role |
+|---|---|---|
+| 0–2 | `Conv`, `Conv`, `C3k2` | Early downsampling and feature extraction. |
+| 3–4 | `Conv`, `C3k2` | Backbone features at stride 8. |
+| 5–6 | `Conv`, `C3k2` | Backbone features at stride 16. |
+| 7–8 | `Conv`, `C3k2` | Backbone features at stride 32. |
+| 9–10 | `SPPF`, `C2PSA` | Pooling expands the spatial context, then attention refines the deepest features. |
+| 11–13 | `Upsample`, `Concat`, `C3k2` | Upsamples and fuses with backbone layer 6 at stride 16. |
+| 14–16 | `Upsample`, `Concat`, `C3k2` | Upsamples and fuses with backbone layer 4 at stride 8. |
+| 17–19 | `Conv`, `Concat`, `C3k2` | Downsamples and fuses with neck layer 13 at stride 16. |
+| 20–22 | `Conv`, `Concat`, `C3k2` | Downsamples and fuses with layer 10 at stride 32. |
+| 23 | `Detect` | Predicts box coordinates and drone scores using layers 16, 19 and 22 at strides 8, 16 and 32. |
+
+</details>
+
+Models and crop coordinates use source-image pixels once their predictions are
+mapped back. The offline tracking scripts use a 1920 × 1080 tracker canvas.
+The demos and `pi_run.py` pass the decoded dimensions to the tracker.
+
+### Six image layers
+
+[`LayerMaker`](layers.py) scales each frame to a fixed width while preserving
+its aspect ratio. The standalone default is 960 px. The recommended boosted
+preset uses 480 px, which gives a 480 × 270 layer grid for 1920 × 1080 input.
+Each layer is an unsigned 8-bit image on that grid.
+
+**Shared camera alignment.** The frame is converted to grayscale and lightly
+blurred. To align successive frames, the code tracks corners with pyramidal
+Lucas–Kanade optical flow, fits a RANSAC homography and applies sanity checks
+to its scale, perspective and shift. If feature alignment fails, phase
+correlation estimates a translation. Weak responses or shifts above 40
+working pixels fall back to zero translation. Adjacent transforms are composed
+to align older frames with the current one. Pixels outside the valid warped
+area contribute zero to the short and long differences. Difference maps
+use a noise estimate of `1.4826 × median difference + 1`. The layer divides
+the difference by that estimate, scales it by `gain / 4` (default gain 32) and
+clips it to the 8-bit range.
+
+| Layer | How it is computed | Role in the boosted pipeline |
+|---|---|---|
+| `short` | Takes the smaller of the two absolute grayscale differences against the aligned frames at `t−1` and `t−2`. It starts at zero until both frames are available. | Together with `long`, contributes one motion vote. The minimum reduces changes that appear in only one comparison. |
+| `long` | Takes the absolute difference against the aligned frame at `t−10` by default. It stays at zero during the initial history window. | Makes slower changes visible and shares the motion vote with `short`. |
+| `bg` | Warps the running background into the current frame, initializes newly exposed pixels from the current image, then blends 95% previous background with 5% current grayscale. The layer is the difference from the updated background and starts at zero. | Contributes a background vote for pixels that depart from the running scene model. |
+| `track` | Draws a Gaussian spot around each predicted active-track center. Its horizontal and vertical spreads are 0.6× the predicted box dimensions, with a 4-pixel minimum in working coordinates. Overlapping spots combine by maximum. | Marks areas where consensus can accept weaker evidence. With no predictions it is zero. |
+| `prev` | Shows the aligned previous grayscale frame once two earlier frames are available. During startup it shows the current grayscale image. | Used in the layer viewer and available in the packed layer tensor. Consensus leaves it out of voting. |
+| `shape` | Measures absolute contrast from the local mean in a 121 × 121 window. It divides by the local standard deviation plus 4, multiplies by 48, then clips to the 8-bit range. | Contributes a contrast vote. A bright or dark silhouette can register even when it barely moves, while textured regions get a higher divisor. |
+
+`layers.stack()` stacks the maps in the order `short, long, bg, track, prev, shape`
+into an `H × W × 6` array. This tensor is available for experimentation.
+[`mlayer.py`](mlayer.py) implements a separate
+[`train.py --variant ml`](train.py) experiment. Its first convolution receives
+five channels made from the same frame, `R, G, B, grayscale, inverted grayscale`.
+The extra channels start with zero convolution weights so the replacement stem
+starts with the RGB model's output.
+
+**Separate motion detector.** [`MotionDetector`](motion_live.py) supports the
+basic demo's difference image, motion mask and optional motion-seeded crops.
+It aligns the past two frames, takes the minimum of their absolute differences,
+thresholds at four times its noise estimate, then opens and dilates the mask
+before extracting connected components. It reports full-frame motion blobs with
+a strength and a persistence count over the previous two frames. The basic
+pipeline can send strong, uncovered spots to the crop detector.
+[`motion_verify.py`](motion_verify.py) is an offline variant that reads cached
+motion blobs and runs the detector on up to eight uncovered crops per frame by
+default. The recommended boosted preset keeps these standalone motion-seeded
+crops off and still uses temporal motion in consensus.
+
+### Consensus and score refinement
+
+[`Consensus`](consensus.py) gives each pixel up to three votes using the
+default thresholds below.
+
+| Vote | Condition |
+|---|---|
+| Motion | `max(short, long) > 128` |
+| Background difference | `bg > 128` |
+| Local contrast | `shape > 150` |
+
+Two votes are enough across the frame. Where `track > 40`, one vote is enough.
+A 3 × 3 morphological close joins small gaps in the binary mask. The code
+then extracts 8-connected components. It keeps areas from 3 pixels to 0.4%
+of the layer grid and an aspect ratio up to 6. It ranks the components by
+layer evidence with a bonus near a predicted track. A component must be near
+an eligible component from the previous frame or reach an evidence score of
+1.0. The persistence radius scales with layer width and is 30 px at 480 px. The five highest-ranked survivors are returned as
+full-frame blobs. The binary mask remains available before blob filtering.
+
+The recommended preset applies these operations in order after crop merging.
+
+| Operation | Input and decision | Effect |
+|---|---|---|
+| Verifier | Checks the binary mask around each candidate below `0.50`, after mapping its box to the layer grid and expanding it by two working pixels on each side. | Multiplies the score by `0.30` when the box has no mask support. |
+| Agreement boost | Compares candidates scoring at least `0.10` and below `0.30` with the filtered blobs. Their centers must line up by the containment test and the blob's largest dimension must be 0.5–2× the box's. | Raises a qualifying score to `0.65` before tracking. |
+| Motion-aware keeper | Looks for a nearby, similarly sized filtered blob when an active track has no supporting candidate. The blob must agree with that track's motion from the previous frame. | Supplies a temporary box at confidence `0.25` to continue an existing track for up to five frames. |
+
+For moving tracks, keeper motion must be within 45° of the predicted direction
+and 0.5–1.5× the predicted speed. For an almost stationary track, the keeper
+requires the blob to be almost stationary as well. A valid detector candidate
+resets the keeper streak. If blob support fails during a gap, the keeper waits
+for detector support before continuing again. The verifier uses the mask,
+while the boost and keeper use the filtered blob list. The keeper can bridge
+an existing track gap. New tracks come from detector candidates, including
+candidates whose scores were boosted.
+
+[`boost.py`](boost.py) implements this sequence for `pi_run.py`.
+[`pipeline_boost.py`](pipeline_boost.py) exposes the component flags for scoring.
+The documented run uses
+`--no-motion --layer-width 480 --verify --keeper2 --agree-boost 0.1 --boost-to 0.65 --crop-scale 2`.
+Calling the offline script with its bare defaults leaves verification, score
+boosting and the keeper off and uses 1× crops with 960 px layers. The offline
+script also offers `--blobs consensus` or `--blobs motion` for extra crop
+proposals, `--keeper` for a position-only keeper, and `--agree-filter` to drop
+boxes below `0.60` without a matching consensus blob.
+
+### Tracking and result files
+
+[`TwoDroneTracker`](tracker.py) uses a constant-velocity Kalman filter. Its
+state contains the box center and size `(cx, cy, w, h)` plus their four
+per-frame velocities. It predicts boxes before assignment and updates the
+state using candidate measurements. The tracker assigns boxes with the
+Hungarian algorithm using center distance normalized by box size plus a
+penalty for a box-area change. Missing tracks get a wider position gate.
+
+1. **Associate active tracks.** Match scores at or above `0.60` first, then
+   let unmatched active tracks use candidates from `0.05` up to `0.60`.
+2. **Recover a recent ID.** A remaining candidate at or above `0.20` can
+   recover an ID lost within 30 frames of its last observation if its position
+   and box area pass the re-acquisition gates.
+3. **Confirm a tentative track.** New tracks use unmatched high-score
+   detections and require three matching hits. Although the separate
+   `new` threshold defaults to `0.30`, the high-score pool sets the effective
+   default entry floor of `0.60`. Confirmation can backfill the tentative
+   observations into the result file.
+4. **Coast and reassign.** A confirmed track can emit its predicted box for up
+   to three consecutive misses, decaying confidence by `0.6 ** misses`.
+   After that, its state moves into the lost list. If both IDs are free,
+   stored position and aspect help choose an ID. The tracker-only replay can
+   also use hue/saturation and brightness histograms when `--videos` is
+   supplied. Those histograms affect lost-ID assignment.
+5. **Resolve duplicates.** A newly confirmed, nearby, similarly sized track can
+   inherit the ID of a coasting track. Containment checks suppress duplicate
+   starts and merge conflicting active tracks. The current-frame output keeps
+   the stronger box when two boxes are mostly contained or their centers are
+   closer than half the larger box's longest side.
+
+**Screen and file output.** The tracker clips boxes to the frame, rejects
+boxes with a side below 2 px or less than a quarter of their original area
+visible, and applies the default `0.05` output floor. The boosted demo
+applies a separate display rule. It waits for 12 current-frame observations
+and a median confidence of at least `0.50` over the first 60 observations
+available. A new appearance needs `--show-min` (default `0.30`) to be drawn.
+Once visible, it can stay on screen down to `0.05`.
+
+At export, `dedupe_lines()` keeps the highest-confidence box per frame and ID.
+It groups each ID's emitted observations into appearances across frame-number
+gaps of at most five, drops appearances spanning fewer than 12 frames, and
+drops appearances whose first up to 60 emitted scores have a median below
+`0.50`. These filters operate on frame counts and the complete result file.
+
+Each result file contains one comma-separated row per emitted box.
+
+```text
+frame,id,left,top,width,height,confidence
+```
+
+Frames are one-based. Coordinates are in source-image pixels. Detector caches
+use the same columns with a placeholder ID of `1`. Ground truth goes in
+`<clip>/gt/gt.txt` with the first six columns. The evaluator expects a result
+file named `<clip>.txt` for each clip.
+[`eval_track.py`](eval_track.py) matches boxes at IoU ≥ 0.50 for MOTA, IDF1,
+precision, recall and ID switches. It reports mean per-clip AP50 as a separate
+box metric. Its `--min-conf` applies to MOT metrics. [`score.py`](score.py)
+also reports detector-only AP50, AP30 and the best-F1 confidence.
+
+### Entry points and demo views
+
+| Entry point | Processing path |
+|---|---|
+| [`run_video.py`](run_video.py) | Whole-frame detector and candidate cache. |
+| [`run_tracker.py`](run_tracker.py) | Tracker-only replay from the cache, with optional video-derived appearance histograms. |
+| [`pipeline.py`](pipeline.py) | Whole-frame inference or cached candidates, 1× trajectory crops, optional precomputed motion crops and tracking. |
+| [`pipeline_boost.py`](pipeline_boost.py) | Configurable offline boosted path for scoring. Use the recommended flags above to enable the full two-model preset. |
+| [`demo.py`](demo.py) | Interactive basic path using [`DroneStack`](stack.py). Uses one checkpoint for full frames and crops, with optional motion crops and layer views. |
+| [`demo_boost.py`](demo_boost.py) | Interactive two-model boosted demo. `--one-model` also uses SkyGuard for crop inference. `--view overlay` starts with the consensus overlay. |
+| [`pi_run.py`](pi_run.py) | Torch or Hailo inference with the shared boosted logic. `--simple` uses the whole-frame model for 1× crops and skips the consensus stage. |
+
+| View | How to open it | What it shows |
+|---|---|---|
+| Camera | `1` in both demos | Source video with current track boxes, IDs and optional trails. |
+| Motion difference, mask and four-panel view | `2`, `3`, `4` in the basic demo | Legacy motion response, its binary mask, or camera, response, mask and background together. |
+| Individual layer views | `5`, `6`, `7`, `8`, `9`, `b` in the basic demo | Short, long, background, track prior, previous grayscale and local contrast, respectively. |
+| All layers | `0` in both demos | A 4 × 2 grid of the camera, all six maps and a grayscale camera panel. |
+| Consensus | `c` in the boosted demo | The white consensus mask with filtered blobs outlined in green. |
+| Camera + consensus | `o` or `--view overlay` in the boosted demo | The consensus mask tinted red over the original video. |
+
+In the basic demo, `m` switches motion crops and `p` switches trajectory crops.
+In the boosted demo, `b` switches the score boost, `k` switches the keeper, and `f` toggles the optional camera-motion-subtracted optical-flow diagnostic (extra CPU work while enabled). `o` overlays the consensus mask on the camera view.
+Both demos use `t` to switch trails. The boosted view outlines crop regions in
+green, boosted candidates in yellow and keeper boxes with a dashed outline.
+
+**Runtime backends.** `pi_run.py` overlaps frame capture, whole-frame inference,
+and the ordered finish stage with three threads and bounded queues. The finish
+stage runs crops, consensus and association in order so each frame receives
+the latest tracker state. Torch selects MPS, CUDA or CPU. Hailo uses compiled
+`.hef` models with on-device non-maximum suppression. Its adapter letterboxes
+BGR frames into RGB and maps normalized boxes back to source coordinates. The
+compiled models fix the input resolution. Image layers and tracking run on
+the CPU in both backends. `--cmc` additionally applies the layer alignment
+transform to tracker positions and velocities and is off by default.
 
 ## Scores on the 3 practice videos (IoU 0.5)
 
