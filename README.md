@@ -217,6 +217,24 @@ the **Dataflow Compiler** wheel (`hailo_dataflow_compiler-<ver>-py3-none-linux_x
 - Big accuracy drop after 8-bit conversion: more and more varied calibration images (`--n 1000`).
 - Whole frame at 960 / 1280: copy the Model Zoo's `yolov11n.yaml`, change the input shape, `hailomz compile --yaml my.yaml ...`.
 
+#### Optional 960px whole-frame model (Pi only)
+
+Keep the existing HEF and Mac setting unchanged. A 960px HEF is a separate Pi model selected explicitly with `--hef`; Hailo uses the input size compiled into the HEF, so `--imgsz` does not resize it. The 960px Mac test was faster than 1280 but lost accuracy, so score this Pi build before adopting it.
+
+Export SkyGuard at 960, copy the Model Zoo's `yolov11n.yaml` to `yolov11n_960.yaml`, set its `preprocessing.input_shape` to `[960, 960, 3]`, then compile it on the same x86 Linux/WSL2 environment and Hailo software release as the existing HEFs:
+
+    python -c "from ultralytics import YOLO; YOLO('$D/pretrained/drone-detection-yolov11/best.pt').export(format='onnx', imgsz=960, opset=11)"
+    cp best.onnx best_960.onnx
+    hailomz compile --ckpt best_960.onnx --yaml yolov11n_960.yaml --hw-arch hailo8 --calib-path calib/ --classes 1
+    mv yolov11n.hef skyguard_960.hef
+
+Copy `skyguard_960.hef` to the Pi alongside the unchanged `crop_640.hef`, then run the same videos with:
+
+    python pi_run.py test_sample_clean --backend hailo --hef skyguard_960.hef --crop-hef crop_640.hef --out results_960
+    python evaluation.py --gt_dir test_sample_clean --pred_dir results_960
+
+This changes only the Pi run that names `skyguard_960.hef`; the Mac/PyTorch run and the existing HEF remain at their current sizes. Compare the printed Pi fps and evaluation score with the existing HEF before choosing which one to use.
+
 ### 4. Set up the Pi
 
 Raspberry Pi OS 64-bit, AI HAT+ attached:
