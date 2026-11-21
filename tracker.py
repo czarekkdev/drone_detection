@@ -12,6 +12,8 @@ HANDOVER = True    # a newly confirmed track takes over the number of a same-siz
                    # Anti-UAV 67 videos: ID switches 63 -> 53; practice videos unchanged
 INSIDE = 0.7       # a box lying this much inside a tracked drone's box can't start a new track (part of the same drone)
 MERGE = True       # two tracks on the same drone (one box INSIDE the other): keep the one seen longer, drop the other
+MIN_SHOW = 0.05    # don't output boxes below this confidence (tracking continues underneath). Practice 0.8832 -> 0.8848,
+                   # Anti-UAV 0.631 -> 0.635 (not tuned there); 0.1+ is worse (hides correct faint / coasting boxes)
 W_SIZE = 0.0       # weight of box size when deciding which lost drone came back (tested 0.5-1: no effect on practice)
 HANDOVER_DIST = 3.0  # only if the new track is within this many drone sizes of where the coasting one was last SEEN
 
@@ -226,7 +228,7 @@ class TwoDroneTracker:
                 if not any(max(_inside(o[2], k[2]), _inside(k[2], o[2])) >= INSIDE for k in keep):
                     keep.append(o)
             out = [o for o in out if o[0] != frame] + keep
-        return out
+        return [o for o in out if o[3] >= MIN_SHOW]
 
     def _clip(self, o):
         """keep boxes inside the picture (a coasting drone flying out would otherwise get negative coordinates);
