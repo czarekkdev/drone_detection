@@ -1,16 +1,24 @@
-"""Pi-style real-time pipeline: 3 threads that overlap (read -> model -> tracker), per-stage timing, result file.
-Same code on the Mac (PyTorch backend) and on the Raspberry Pi + AI HAT+ (Hailo backend).
+"""Real-time pipeline for the Raspberry Pi + AI HAT+ (Hailo-8), running the FULL best setup (MOTA 0.883 on the practice videos):
+whole-frame SkyGuard + 2x-enlarged trajectory crops with the fine-tuned crop model + shape layer (verify, agreement booster,
+motion-checked keeper) + tracker with quick re-acquisition. Same stages and numbers as pipeline_boost.py's best flags (boost.py).
+3 threads overlap: read -> whole-frame model -> finish (crops + shape layer + booster/keeper + tracker).
+Same code on the Mac (PyTorch backend) and on the Pi (Hailo backend, two .hef files: whole frame and crop model).
 
-  Mac:  python pi_run.py ../test_sample_clean/test_6_hard_PXL_20261113_154422245_hard/video.mp4
-  Pi:   python pi_run.py video.mp4 --backend hailo --hef skyguard.hef
-  live: python pi_run.py 0 --backend hailo --hef skyguard.hef          (camera 0)
-  all practice videos:  python pi_run.py ../test_sample_clean --out results
+  Mac, all practice videos (check the score):
+    python pi_run.py ../test_sample_clean --out results
+  Mac, same but reuse the cached whole-frame detections (must give exactly the pipeline_boost.py result):
+    python pi_run.py ../test_sample_clean --out results --dets preds/hf_skyguard
+  Pi:   python pi_run.py video.mp4 --backend hailo --hef skyguard_1280.hef --crop-hef crop_640.hef
+  live: python pi_run.py 0 --backend hailo --hef skyguard_1280.hef --crop-hef crop_640.hef      (camera 0)
+  old simple pipeline (no shape layer, no 2x fine-tuned crops): add --simple
 
-Prints: end-to-end fps, average ms per stage (read/model/track), and the slowest stage (= the fps limit)."""
+Prints: end-to-end fps, average ms per stage (read / whole-frame model / crops / shape layer / tracker), and the slowest stage
+(= the fps limit)."""
 import argparse, os, glob, queue, threading, time
 import cv2
 import numpy as np
 from tracker import TwoDroneTracker
+from boost import Booster
 
 
 # ---------------- model backends ----------------
@@ -21,19 +29,19 @@ class TorchBackend:
         self.m = YOLO(weights); self.imgsz = imgsz
         self.dev = device or ("mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"))
 
-    def infer(self, images, imgsz=None):
+    def infer(self, images, imgsz=None, conf=0.01):
         """images: list of BGR arrays -> list of [(x1,y1,x2,y2,conf), ...] in each image's pixels"""
-        rs = self.m.predict(images, imgsz=imgsz or self.imgsz, conf=0.01, device=self.dev, verbose=False)
+        rs = self.m.predict(images, imgsz=imgsz or self.imgsz, conf=conf, device=self.dev, verbose=False)
         return [[(*b, c) for b, c in zip(r.boxes.xyxy.tolist(), r.boxes.conf.tolist())] for r in rs]
 
 
 class HailoBackend:
     """HailoRT backend (Raspberry Pi AI HAT+). Expects a .hef compiled WITH the NMS post-process
     (standard for Hailo model-zoo YOLO builds). Not testable off the Pi: report errors and we fix them there."""
-    def __init__(self, hef_path):
+    def __init__(self, hef_path, vdevice=None):
         from hailo_platform import (HEF, VDevice, HailoStreamInterface, ConfigureParams, InferVStreams,
                                     InputVStreamParams, OutputVStreamParams, FormatType)
-        self.hef = HEF(hef_path); self.dev = VDevice()
+        self.hef = HEF(hef_path); self.dev = vdevice or VDevice()  # share one VDevice for the 2 models
         cp = ConfigureParams.create_from_hef(self.hef, interface=HailoStreamInterface.PCIe)
         self.ng = self.dev.configure(self.hef, cp)[0]; self.ngp = self.ng.create_params()
         self.inp = self.hef.get_input_vstream_infos()[0]; self.outname = self.hef.get_output_vstream_infos()[0].name
@@ -50,7 +58,7 @@ class HailoBackend:
         canvas[py:py + nh, px:px + nw] = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LINEAR)
         return cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB), s, px, py
 
-    def infer(self, images, imgsz=None):
+    def infer(self, images, imgsz=None, conf=0.01):
         batch, meta = [], []
         for im in images:
             x, s, px, py = self._letterbox(im); batch.append(x); meta.append((s, px, py))
@@ -60,23 +68,31 @@ class HailoBackend:
             dets = []
             for cls_dets in r:  # per class: array of [ymin, xmin, ymax, xmax, score] normalised to the input
                 for y1, x1, y2, x2, sc in np.asarray(cls_dets).reshape(-1, 5):
+                    if sc < conf:
+                        continue
                     dets.append(((x1 * self.w - px) / s, (y1 * self.h - py) / s, (x2 * self.w - px) / s, (y2 * self.h - py) / s, float(sc)))
             out.append(dets)
         return out
 
 
 # ---------------- pipeline ----------------
-def iou(a, b):
-    ix = max(0, min(a[2], b[2]) - max(a[0], b[0])); iy = max(0, min(a[3], b[3]) - max(a[1], b[1]))
-    i = ix * iy; return i / ((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - i + 1e-9)
+def read_dets(path):
+    D = {}
+    if path and os.path.exists(path):
+        for l in open(path):
+            v = l.strip().split(",")
+            if len(v) > 5:
+                f, _, x, y, w, h, c = [float(q) for q in v[:7]]
+                D.setdefault(int(f), []).append((x, y, x + w, y + h, c))
+    return D
 
 
-def run(source, backend, out_path, use_pred=True, crop=320, realtime=False):
+def run(source, backend, booster, out_path, realtime=False, cached=None):
     cap = cv2.VideoCapture(int(source) if str(source).isdigit() else source)
     W, H = int(cap.get(3)), int(cap.get(4)); src_fps = cap.get(5) or 30
     q1, q2 = queue.Queue(maxsize=4), queue.Queue(maxsize=4)
-    T = TwoDroneTracker(frame_size=(W, H)); lock = threading.Lock()
-    t = {"read": [], "model": [], "track": []}; lines = []; done_t = {}
+    T = TwoDroneTracker(frame_size=(W, H)); booster.reset()
+    t = {"read": [], "model": [], "finish": [], "track": []}; lines = []; done_t = {}
 
     def reader():
         n = 0; t_start = time.time()
@@ -85,54 +101,37 @@ def run(source, backend, out_path, use_pred=True, crop=320, realtime=False):
             if not ok:
                 break
             n += 1
-            if realtime:  # behave like a camera: frames arrive at the video's fps, drop if we fall behind
+            if realtime:  # behave like a camera: frames arrive at the video's fps
                 wait = t_start + n / src_fps - time.time()
                 if wait > 0:
                     time.sleep(wait)
             q1.put((n, f, time.time()))
         q1.put(None)
 
-    def model():
+    def model():  # whole-frame detector (or cached detections)
         while True:
             item = q1.get()
             if item is None:
                 q2.put(None); break
             n, f, t_in = item; t0 = time.time()
-            dets = backend.infer([f])[0]
-            if use_pred:  # crops at predicted spots of drones the full-frame pass missed
-                with lock:
-                    preds = T.predictions()
-                low = T.p["low"]; centers = []
-                for _, pb, _ in preds:
-                    if not any(iou(pb, d) > 0.2 and d[4] >= low for d in dets):
-                        centers.append(((pb[0] + pb[2]) / 2, (pb[1] + pb[3]) / 2))
-                if centers:
-                    tiles, offs = [], []
-                    for cx, cy in centers:
-                        x0 = int(min(max(cx - crop / 2, 0), W - crop)); y0 = int(min(max(cy - crop / 2, 0), H - crop))
-                        tiles.append(f[y0:y0 + crop, x0:x0 + crop]); offs.append((x0, y0))
-                    for ds, (x0, y0) in zip(backend.infer(tiles, imgsz=crop), offs):
-                        for x1, y1, x2, y2, c in ds:
-                            b = (x1 + x0, y1 + y0, x2 + x0, y2 + y0, c)
-                            if not any(iou(b, d) > 0.3 for d in dets):
-                                dets.append(b)
-            t["model"].append(time.time() - t0); q2.put((n, dets, t_in))
+            dets = list(cached.get(n, [])) if cached is not None else backend.infer([f])[0]
+            t["model"].append(time.time() - t0); q2.put((n, f, dets, t_in))
 
-    def tracker():
+    def finish():  # crops + shape layer + booster/keeper + tracker, in frame order (needs the up-to-date tracker)
         lat = []
         while True:
             item = q2.get()
             if item is None:
                 break
-            n, dets, t_in = item; t0 = time.time()
-            with lock:
-                out = T.step(n, dets)
-            for f2, i, (x1, y1, x2, y2), c in out:
+            n, f, dets, t_in = item; t0 = time.time()
+            dets = booster.step(f, dets, T)
+            t1 = time.time()
+            for f2, i, (x1, y1, x2, y2), c in T.step(n, dets):
                 lines.append(f"{f2},{i},{x1:.2f},{y1:.2f},{x2 - x1:.2f},{y2 - y1:.2f},{c:.4f}")
-            t["track"].append(time.time() - t0); lat.append(time.time() - t_in)
+            t["track"].append(time.time() - t1); t["finish"].append(time.time() - t0); lat.append(time.time() - t_in)
         done_t["lat"] = lat; done_t["n"] = len(lat)
 
-    ths = [threading.Thread(target=x) for x in (reader, model, tracker)]
+    ths = [threading.Thread(target=x) for x in (reader, model, finish)]
     t_start = time.time()
     for th in ths:
         th.start()
@@ -142,29 +141,57 @@ def run(source, backend, out_path, use_pred=True, crop=320, realtime=False):
     lines.sort(key=lambda l: (int(l.split(",")[0]), int(l.split(",")[1])))
     open(out_path, "w").write("\n".join(lines) + "\n")
     ms = {k: 1000 * np.mean(v) if v else 0 for k, v in t.items()}
-    slow = max(ms, key=ms.get)
+    bt = {k: 1000 * np.mean(v) if v else 0 for k, v in booster.t.items()}
+    stages = {"read": ms["read"], "model": ms["model"], "finish": ms["finish"]}  # the 3 threads
+    slow = max(stages, key=stages.get)
     print(f"{os.path.basename(out_path)}: {n} frames in {total:.1f}s = {n / total:.1f} fps end-to-end | "
-          f"read {ms['read']:.1f} ms, model {ms['model']:.1f} ms, track {ms['track']:.2f} ms per frame | "
-          f"limit = {slow} ({1000 / max(ms[slow], 1e-6):.0f} fps) | latency {1000 * np.median(done_t['lat']):.0f} ms")
+          f"read {ms['read']:.1f} | whole-frame model {ms['model']:.1f}{' (cached)' if cached is not None else ''} | "
+          f"finish {ms['finish']:.1f} = crops {bt['crops']:.1f} + shape layer {bt['layers']:.1f} + booster/keeper {bt['logic']:.2f} "
+          f"+ tracker {ms['track']:.2f} ms/frame | limit = {slow} thread ({1000 / max(stages[slow], 1e-6):.0f} fps) | "
+          f"latency {1000 * np.median(done_t['lat']):.0f} ms")
 
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("source", help="video file, folder of video folders (practice-set layout), or camera number")
     p.add_argument("--backend", choices=["torch", "hailo"], default="torch")
-    p.add_argument("--weights", default="../pretrained/drone-detection-yolov11/best.pt")
-    p.add_argument("--hef", default="skyguard.hef")
-    p.add_argument("--imgsz", type=int, default=1280)
+    p.add_argument("--weights", default="../pretrained/drone-detection-yolov11/best.pt", help="whole-frame model (SkyGuard)")
+    p.add_argument("--crop-weights", default="runs/ft_1280/weights/epoch0.pt", help="crop model (release v0.883 asset)")
+    p.add_argument("--hef", default="skyguard.hef", help="Hailo: whole-frame model")
+    p.add_argument("--crop-hef", default="crop_640.hef", help="Hailo: crop model, compiled at 640x640")
+    p.add_argument("--imgsz", type=int, default=1280, help="whole-frame size (torch backend; on Hailo it is fixed by the .hef)")
+    p.add_argument("--layer-width", type=int, default=480)
     p.add_argument("--device", default=None)
-    p.add_argument("--no-pred", action="store_true")
+    p.add_argument("--dets", default="", help="folder of cached whole-frame detections (run_video.py output) instead of the model")
+    p.add_argument("--simple", action="store_true", help="old pipeline: no shape layer, plain 1x crops with the whole-frame model")
     p.add_argument("--realtime", action="store_true", help="feed frames at the video's own fps, like a camera")
     p.add_argument("--out", default="results")
     a = p.parse_args()
-    be = HailoBackend(a.hef) if a.backend == "hailo" else TorchBackend(a.weights, a.imgsz, a.device)
+    if a.backend == "hailo":
+        from hailo_platform import VDevice
+        params = VDevice.create_params()
+        try:  # let HailoRT switch between the two models
+            from hailo_platform import HailoSchedulingAlgorithm
+            params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
+        except Exception:
+            pass
+        vd = VDevice(params)
+        be = HailoBackend(a.hef, vd)
+        cb = be if a.simple else HailoBackend(a.crop_hef, vd)
+    else:
+        be = TorchBackend(a.weights, a.imgsz, a.device)
+        cb = be if a.simple else TorchBackend(a.crop_weights, 640, a.device)
+    if a.simple:
+        booster = Booster(cb, crop_scale=1.0, crop_imgsz=320, use_layers=False)
+    else:
+        booster = Booster(cb, crop_scale=2.0, crop_imgsz=320, layer_width=a.layer_width)
     os.makedirs(a.out, exist_ok=True)
     if os.path.isdir(a.source):
         for v in sorted(glob.glob(os.path.join(a.source, "*", "video.mp4"))):
-            run(v, be, os.path.join(a.out, os.path.basename(os.path.dirname(v)) + ".txt"), not a.no_pred)
+            name = os.path.basename(os.path.dirname(v))
+            cached = read_dets(os.path.join(a.dets, name + ".txt")) if a.dets else None
+            run(v, be, booster, os.path.join(a.out, name + ".txt"), cached=cached)
     else:
         name = "camera" if a.source.isdigit() else (os.path.basename(os.path.dirname(os.path.abspath(a.source))) if os.path.basename(a.source) == "video.mp4" else os.path.splitext(os.path.basename(a.source))[0])
-        run(a.source, be, os.path.join(a.out, name + ".txt"), not a.no_pred, realtime=a.realtime)
+        cached = read_dets(os.path.join(a.dets, name + ".txt")) if a.dets else None
+        run(a.source, be, booster, os.path.join(a.out, name + ".txt"), realtime=a.realtime, cached=cached)

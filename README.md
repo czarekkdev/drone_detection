@@ -72,7 +72,9 @@ yellow box = booster confirmed a faint detection, dashed box = keeper held the t
     python demo_boost.py                         # hard practice video
     python demo_boost.py --video path/to/any.mp4 # any video, --video 0 for the camera
 
-Pi-style timing on the Mac (same code, PyTorch instead of Hailo): `python pi_run.py <video.mp4>`.
+`pi_run.py` is the real-time program for the Pi and runs the **full 0.883 setup** (same stages as `pipeline_boost.py`, shared in `boost.py`).
+Check on the Mac (same code, PyTorch instead of Hailo): `python pi_run.py ../test_sample_clean --out results` and score `results/`.
+With `--dets preds/hf_skyguard` it reuses the cached whole-frame detections and gives byte-identical files to `pipeline_boost.py`. `--simple` = old pipeline.
 
 ## Windows
 
@@ -163,6 +165,10 @@ Start at 640 (the Hailo Model Zoo default for YOLO11n), measure fps on the Pi, a
 
 Then copy `skyguard.hef` next to `pi_run.py` and continue below.
 
+**6. The crop model (second .hef).** The full setup also runs the fine-tuned crop model (release v0.883 asset, saved as
+`runs/ft_1280/weights/epoch0.pt`) on 320 px crops enlarged 2x, so compile it at **640x640**: export it to ONNX the same way
+(`imgsz=640`), compile, and `mv yolov11n.hef crop_640.hef`. It runs only on ~0.1 crops per frame, so it costs little.
+
 ### Running on the Pi
 
 **1. Set up the Pi** (Raspberry Pi OS 64-bit, AI HAT+ attached):
@@ -175,13 +181,16 @@ Then copy `skyguard.hef` next to `pi_run.py` and continue below.
 
 **2. Run:**
 
-    python pi_run.py video.mp4 --backend hailo --hef skyguard.hef                  # one video
-    python pi_run.py data --backend hailo --hef skyguard.hef --out results         # folder of <video>/video.mp4
-    python pi_run.py 0 --backend hailo --hef skyguard.hef                          # live camera
-    python pi_run.py video.mp4 --backend hailo --hef skyguard.hef --realtime       # feed at the video's own fps
+    H="--backend hailo --hef skyguard.hef --crop-hef crop_640.hef"
+    python pi_run.py video.mp4 $H                  # one video
+    python pi_run.py data $H --out results         # folder of <video>/video.mp4
+    python pi_run.py 0 $H                          # live camera
+    python pi_run.py video.mp4 $H --realtime       # feed at the video's own fps
 
-It prints end-to-end fps and ms per stage (read / model / tracker); the slowest stage is the fps limit.
-Results go to `results/<video folder name>.txt`. The tracker takes under 1 ms per frame, so the model sets the speed.
+Three threads overlap: read, whole-frame model, finish (crops + shape layer + booster/keeper + tracker).
+It prints end-to-end fps and ms per stage; the slowest thread is the fps limit (50 fps = 20 ms).
+Results go to `results/<video folder name>.txt`. The shape layer is CPU work: about 8 ms/frame at 480 px on the Mac, likely
+2-3x more on the Pi 5. If the finish thread is the limit, try `--layer-width 320` and re-check the score.
 If 1280 px is too slow on the Hailo, export at 960 or 640 and compare fps and scores.
 
 ## Training
