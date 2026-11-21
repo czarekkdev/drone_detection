@@ -1,0 +1,9 @@
+# paths relative to this file's folder (code/)
+path: drone_data
+train:
+  - train/images          # hackathon_dataset (single class, from prep_data.py)
+  - antiuav/train/images  # Anti-UAV-RGBT visible, every 10th frame
+val:
+  - antiuav/val/images    # Anti-UAV-RGBT val, every 30th frame
+names:
+  0: drone

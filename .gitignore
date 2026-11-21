@@ -4,24 +4,31 @@ __pycache__/
 *.pyc
 .venv/
 
-# Datasets & test videos (too large for git)
+# Datasets and generated outputs
 Anti-UAV-RGBT training data/
 hackathon_dataset/
 test_sample_clean/
+drone_data/
 code/drone_data/
+runs/
+code/runs/
+preds/
+code/preds/
+demo_out/
+code/demo_out/
+results/
 
-# Model weights
+# Model weights and compiler artifacts
 *.pt
 *.pth
 *.onnx
 *.engine
+*.hef
 pretrained/
 
-# Outputs / logs
-code/runs/
-code/preds/
-code/demo_out/
+# Logs and videos
 *.log
 *.mp4
 *.avi
 *.mov
+*.cache
