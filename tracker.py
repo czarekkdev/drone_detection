@@ -123,7 +123,7 @@ class TwoDroneTracker:
         """dets: list of (x1,y1,x2,y2,conf).
         returns list of (frame, id, (x1,y1,x2,y2), conf). Usually frame == current frame; when a track is
         confirmed, its first few (tentative) frames are returned too (backfill), so results files are complete."""
-        P = self.p
+        P = self.p; self._frame = frame
         feats = feats if feats is not None else [None] * len(dets)
         for t in self.active + self.tentative:
             t.kf.predict()
@@ -215,6 +215,20 @@ class TwoDroneTracker:
         if cx2 - cx1 < 2 or cy2 - cy1 < 2 or (cx2 - cx1) * (cy2 - cy1) < 0.25 * (x2 - x1) * (y2 - y1):
             return None
         return (f, i, (cx1, cy1, cx2, cy2), min(max(c, 0.0), 1.0))
+
+    def apply_camera(self, H):
+        """camera moved between the last frame and this one: H (3x3, full-res pixels) maps old positions to new ones.
+        Shift every track (active, tentative, recently lost) so its prediction follows the camera, and turn its
+        velocity with the camera, so the Kalman filter only has to model the drone's own motion."""
+        A = H[:2, :2] / H[2, 2]
+        def warp(x, y):
+            v = H @ np.array([x, y, 1.0]); return v[0] / v[2], v[1] / v[2]
+        now = getattr(self, "_frame", 0)
+        recent = [t for t in self.lost.values() if now - t.last <= REACQ_GAP]  # long-lost: chained camera estimates drift
+        for t in self.active + self.tentative + recent:
+            t.kf.x[0], t.kf.x[1] = warp(t.kf.x[0], t.kf.x[1])
+            t.kf.x[4:6] = A @ t.kf.x[4:6]
+            lx, ly = warp(t.last_obs[0], t.last_obs[1]); t.last_obs = (lx, ly, *t.last_obs[2:])
 
     def predictions(self, max_lost_age=30):
         """where we expect each drone in the next frame: [(id or None, box, frames_missed)]"""

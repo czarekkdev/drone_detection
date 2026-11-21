@@ -41,12 +41,13 @@ def same_place(d, b):
 class Booster:
     def __init__(self, crop_backend, crop=320, crop_imgsz=320, crop_scale=2.0, layer_width=480,
                  verify=True, verify_below=0.5, verify_mult=0.3, agree_lo=0.1, boost_to=0.65,
-                 keeper2=True, keeper_conf=0.25, keeper_max=5, use_layers=True, use_crops=True):
+                 keeper2=True, keeper_conf=0.25, keeper_max=5, use_layers=True, use_crops=True, cmc=False):
         self.cb = crop_backend; self.crop, self.crop_imgsz, self.k = crop, crop_imgsz, crop_scale
         self.verify, self.vb, self.vm = verify, verify_below, verify_mult
         self.lo, self.hi = agree_lo, boost_to
         self.keeper2, self.kconf, self.kmax = keeper2, keeper_conf, keeper_max
         self.use_layers, self.use_crops = use_layers, use_crops
+        self.cmc = cmc  # camera-motion compensation: shift the tracker with the camera (measured in layers.py)
         self.lw = layer_width
         self.reset()
 
@@ -73,6 +74,15 @@ class Booster:
 
     def step(self, img, dets, T):
         dets = list(dets); preds = T.predictions(); low = T.p["low"]
+        if self.cmc and self.use_layers:  # shape layer first: it measures the camera motion, then the tracker follows it
+            t1 = time.time()
+            L = self.LM.step(img, [pb for _, pb, _ in preds]); cbl = self.CS.step(L, self.LM.s)
+            if len(self.LM.Hs) and len(self.LM.grays) > 1:
+                s = self.LM.s; S = np.diag([s, s, 1.0])
+                T.apply_camera(np.linalg.inv(S) @ self.LM.Hs[-1] @ S)
+                preds = T.predictions()
+            self.t["layers"].append(time.time() - t1)
+            return self._rest(img, dets, T, preds, low, cbl)
         t0 = time.time()
         if self.use_crops:  # 1 prediction crops
             centers = [((pb[0] + pb[2]) / 2, (pb[1] + pb[3]) / 2) for _, pb, _ in preds
@@ -85,6 +95,19 @@ class Booster:
         L = self.LM.step(img, [pb for _, pb, _ in preds])  # 2 shape layer
         cbl = self.CS.step(L, self.LM.s)
         t2 = time.time(); self.t["layers"].append(t2 - t1)
+        return self._logic(dets, T, preds, low, cbl, t2)
+
+    def _rest(self, img, dets, T, preds, low, cbl):
+        t0 = time.time()
+        if self.use_crops:
+            centers = [((pb[0] + pb[2]) / 2, (pb[1] + pb[3]) / 2) for _, pb, _ in preds
+                       if not any(iou(pb, d) > 0.2 and d[4] >= low for d in dets)]
+            if centers:
+                dets = merge(dets, self._crops(img, centers))
+        t2 = time.time(); self.t["crops"].append(t2 - t0)
+        return self._logic(dets, T, preds, low, cbl, t2)
+
+    def _logic(self, dets, T, preds, low, cbl, t2):
         if self.verify:  # 3
             mk = self.CS.mask; Hm, Wm = mk.shape; nd = []
             for d in dets:
