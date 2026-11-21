@@ -657,7 +657,10 @@ Copy into the `drone_detection` folder on the Pi (USB stick or `scp`): `skyguard
 
 Compare consensus cues while keeping both HEFs enabled. `--layers motion` uses the short/long motion maps;
 add `bg` and then `shape` to compare the extra work and score. Unselected cues are skipped during frame processing.
+Use `--no-layers` to measure the two-model crop pipeline without layer processing; unlike `--simple`, it still
+uses the separate crop HEF and 2x crops.
 
+    python pi_run.py test_sample_clean $H --no-layers --out results_two_model_no_layers
     python pi_run.py test_sample_clean $H --layers motion --out results_motion
     python pi_run.py test_sample_clean $H --layers motion,bg --out results_motion_bg
     python pi_run.py test_sample_clean $H --layers motion,bg,shape --out results_all_layers

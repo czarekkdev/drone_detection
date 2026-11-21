@@ -166,6 +166,8 @@ if __name__ == "__main__":
     p.add_argument("--device", default=None)
     p.add_argument("--dets", default="", help="folder of cached whole-frame detections (run_video.py output) instead of the model")
     p.add_argument("--simple", action="store_true", help="old pipeline: no shape layer, plain 1x crops with the whole-frame model")
+    p.add_argument("--no-layers", action="store_true",
+                   help="disable layer processing but keep the separate crop HEF and enlarged crops")
     p.add_argument("--realtime", action="store_true", help="feed frames at the video's own fps, like a camera")
     p.add_argument("--cmc", action="store_true", help="experimental: shift the tracker with the camera motion (off: 0.860 -> 0.863 MOTA "
                    "and 101 -> 87 wrong boxes in a test, but one re-entry after both drones left got the other number)")
@@ -193,7 +195,7 @@ if __name__ == "__main__":
         booster = Booster(cb, crop_scale=1.0, crop_imgsz=320, use_layers=False)
     else:
         booster = Booster(cb, crop_scale=2.0, crop_imgsz=320, layer_width=a.layer_width, cmc=a.cmc,
-                          layers=layer_names)
+                          use_layers=not a.no_layers, layers=layer_names)
     os.makedirs(a.out, exist_ok=True)
     if os.path.isdir(a.source):
         for v in sorted(glob.glob(os.path.join(a.source, "*", "video.mp4"))):
