@@ -111,87 +111,111 @@ Notes:
 
 ## Raspberry Pi 5 + AI HAT+ (Hailo-8)
 
-Status: the Pi code path (`pi_run.py --backend hailo`) is written but **not tested on a Pi yet**, and the 50 fps target is not measured yet.
+`pi_run.py` runs the **full 0.883 setup** in real time: whole-frame SkyGuard + 2x-enlarged trajectory crops with the
+fine-tuned crop model + shape layer (verify, booster, keeper) + tracker. On the Pi both networks run on the Hailo chip,
+so you need **two `.hef` files**: `skyguard.hef` (whole frame) and `crop_640.hef` (crop model).
 
-### Compiling the model for the Pi (.pt -> .onnx -> .hef)
+Status: **not tested on a real Pi yet** and 50 fps not measured yet. Expect small fixes on the first run.
 
-The Hailo chip can't run a PyTorch `.pt` file. It needs a `.hef` file, made by Hailo's compiler, which
-only runs on an **x86 Linux PC** (Ubuntu 22.04), or Windows with **WSL2 Ubuntu 22.04**. Not on the Mac, not on the Pi.
+Overview (4 machines' worth of steps, but the Mac does 1 and 2):
 
-**1. Export to ONNX (Mac or any PC, in this folder):**
+| Step | Where | Result |
+|---|---|---|
+| 1. Export both models to ONNX | Mac (Python 3.12) | `best.onnx`, `epoch0.onnx` |
+| 2. Calibration images | Mac | `calib/` |
+| 3. Compile | x86 Linux PC: Ubuntu 22.04, or Windows + WSL2 Ubuntu 22.04 (not the Mac, not the Pi) | `skyguard.hef`, `crop_640.hef` |
+| 4. Run + score | Raspberry Pi | fps per stage + MOTA |
 
-    python -c "from ultralytics import YOLO; YOLO('runs/ft_hack/weights/best.pt').export(format='onnx', imgsz=640, opset=11)"
-    # -> runs/ft_hack/weights/best.onnx
+You need: the SkyGuard model (`pretrained/drone-detection-yolov11/best.pt`), the crop model (release v0.883 asset,
+`ft_1280_ep1_crop.pt`, here called `runs/ft_1280/weights/epoch0.pt`), `test_sample_clean/`, and the team's `evaluation.py`.
 
-Start at 640 (the Hailo Model Zoo default for YOLO11n), measure fps on the Pi, and only then try 960 / 1280
-(1280 is about 4x the work of 640, so it is unlikely to reach 50 fps on the Hailo-8).
+### 1. Export to ONNX (Mac)
 
-**2. Make calibration images (Mac or PC):** the compiler converts the model to 8-bit and needs real-looking frames for that.
+The ONNX tools (onnxruntime) have no build for Python 3.15 yet, so use a separate **Python 3.12** environment just for this:
 
-    python make_calib.py --videos ../test_sample_clean --images drone_data/val/images --out calib --n 600
+    brew install python@3.12
+    python3.12 -m venv ~/onnx312
+    ~/onnx312/bin/pip install ultralytics onnx onnxslim onnxruntime
+    D="/Users/<you>/Downloads/drone detecting"        # folder with pretrained/, code/runs/, test_sample_clean/
+    ~/onnx312/bin/python -c "from ultralytics import YOLO; YOLO('$D/pretrained/drone-detection-yolov11/best.pt').export(format='onnx', imgsz=640, opset=11)"
+    ~/onnx312/bin/python -c "from ultralytics import YOLO; YOLO('$D/code/runs/ft_1280/weights/epoch0.pt').export(format='onnx', imgsz=640, opset=11)"
 
-**3. Install the Hailo tools (on the Linux / WSL2 machine):**
+This writes `best.onnx` next to `best.pt` and `epoch0.onnx` next to `epoch0.pt`.
+Both are exported at **640**: the crop model always gets 640x640 (320 px crops enlarged 2x). For the whole-frame model 640
+is the safe start; 1280 is about 4x the work and unlikely to reach 50 fps on the Hailo-8, 960 is the middle option.
 
-- Check the HailoRT version on the Pi first: `hailortcli --version`. The compiler must come from the **same Hailo software release**,
-  otherwise the Pi refuses the .hef. For Hailo-8 that means **DFC 3.x + Model Zoo 2.x** (DFC 4.x / Model Zoo 5.x are for Hailo-10).
-- Log in at the Hailo Developer Zone (free account) -> Software Downloads -> Hailo-8 / AI Software Suite, and download for that release:
-  the **Dataflow Compiler** wheel (`hailo_dataflow_compiler-<ver>-py3-none-linux_x86_64.whl`) and the
-  **Model Zoo** (`hailo_model_zoo-<ver>-py3-none-any.whl`, or `git clone https://github.com/hailo-ai/hailo_model_zoo` at the matching tag).
+### 2. Calibration images (Mac, in this repo folder)
 
-    sudo apt install python3.10-venv python3-dev graphviz libgraphviz-dev
+The compiler converts the models to 8-bit and needs real-looking frames to do that:
+
+    python make_calib.py --videos "$D/test_sample_clean" --out calib --n 600
+
+(`make_calib.py` missing in your folder? `git fetch origin && git checkout origin/main -- make_calib.py`.)
+Copy `best.onnx`, `epoch0.onnx` and the `calib/` folder to the Linux PC.
+
+### 3. Compile (x86 Linux PC or WSL2)
+
+**Match the versions first.** On the Pi run `hailortcli --version`. The compiler must come from the **same Hailo software
+release**, otherwise the Pi refuses the .hef. For Hailo-8 that means **Dataflow Compiler 3.x + Model Zoo 2.x**
+(DFC 4.x / Model Zoo 5.x are for Hailo-10).
+
+Download from the Hailo Developer Zone (free account) -> Software Downloads -> Hailo-8 / AI Software Suite, for that release:
+the **Dataflow Compiler** wheel (`hailo_dataflow_compiler-<ver>-py3-none-linux_x86_64.whl`) and the **Model Zoo**
+(`hailo_model_zoo-<ver>-py3-none-any.whl`, or `git clone https://github.com/hailo-ai/hailo_model_zoo` at the matching tag).
+
+    sudo apt install python3.10 python3.10-venv python3.10-dev graphviz graphviz-dev
     python3.10 -m venv hailo && source hailo/bin/activate
     pip install hailo_dataflow_compiler-*.whl
     pip install hailo_model_zoo-*.whl          # or: cd hailo_model_zoo && pip install -e .
     hailo --version && hailomz --help          # both should work
 
-**4. Compile (copy `best.onnx` and the `calib/` folder to that machine):**
+    hailomz compile yolov11n --ckpt best.onnx   --hw-arch hailo8 --calib-path calib/ --classes 1 && mv yolov11n.hef skyguard.hef
+    hailomz compile yolov11n --ckpt epoch0.onnx --hw-arch hailo8 --calib-path calib/ --classes 1 && mv yolov11n.hef crop_640.hef
 
-    hailomz compile yolov11n --ckpt best.onnx --hw-arch hailo8 --calib-path calib/ --classes 1 --performance
-    mv yolov11n.hef skyguard.hef
+- `yolov11n` is the Model Zoo's YOLO11n recipe, which puts the **NMS post-process on the chip** (pi_run.py expects that).
+- `--classes 1`: both models have one class (drone). `--hw-arch hailo8`: the AI HAT+ 26 TOPS (13 TOPS would be `hailo8l`).
+- Add `--performance` for a faster .hef (compiling takes 30-60+ min); leave it out for a quick first test.
+- Complaints about ONNX end nodes: re-export with `simplify=True`, or pass the `--start-node-names` / `--end-node-names`
+  printed in the error.
+- Big accuracy drop after 8-bit conversion: more and more varied calibration images (`--n 1000`).
+- Whole frame at 960 / 1280: copy the Model Zoo's `yolov11n.yaml`, change the input shape, `hailomz compile --yaml my.yaml ...`.
 
-- `yolov11n` uses the Model Zoo's YOLO11n recipe, which includes the **NMS post-process on the chip** (pi_run.py expects that).
-- `--classes 1`: our model has one class (drone).
-- `--hw-arch hailo8`: the AI HAT+ 26 TOPS is a Hailo-8 (the 13 TOPS one would be `hailo8l`).
-- `--performance` makes the compiler try harder for speed; it can take 30-60+ min. Drop it for a quick first test.
-- If it complains about the ONNX end nodes, re-export with `opset=11` and `simplify=True`, or pass `--start-node-names` /
-  `--end-node-names` as printed in the error (the Model Zoo docs list the YOLO11 end nodes).
-- Big accuracy drop after the 8-bit conversion: use more and more varied calibration images (e.g. `--n 1000`).
-- For a size other than 640, copy the Model Zoo's `yolov11n.yaml` and change the input shape, then `hailomz compile --yaml my.yaml ...`.
+### 4. Set up the Pi
 
-**5. Check the result (on the Pi):**
+Raspberry Pi OS 64-bit, AI HAT+ attached:
 
-    hailortcli parse-hef skyguard.hef          # input should be 640x640x3, output an NMS layer
-    hailortcli run skyguard.hef                # raw chip fps, without video decode or tracker
-
-Then copy `skyguard.hef` next to `pi_run.py` and continue below.
-
-**6. The crop model (second .hef).** The full setup also runs the fine-tuned crop model (release v0.883 asset, saved as
-`runs/ft_1280/weights/epoch0.pt`) on 320 px crops enlarged 2x, so compile it at **640x640**: export it to ONNX the same way
-(`imgsz=640`), compile, and `mv yolov11n.hef crop_640.hef`. It runs only on ~0.1 crops per frame, so it costs little.
-
-### Running on the Pi
-
-**1. Set up the Pi** (Raspberry Pi OS 64-bit, AI HAT+ attached):
-
-    sudo apt update && sudo apt install hailo-all     # Hailo driver + HailoRT + Python bindings, then reboot
-    hailortcli fw-control identify                    # should list the Hailo-8
+    sudo apt update && sudo apt install hailo-all && sudo reboot   # driver + HailoRT + Python bindings
+    hailortcli fw-control identify                                 # should list the Hailo-8
     git clone https://github.com/czarekkdev/drone_detection && cd drone_detection
     python -m venv --system-site-packages .venv && source .venv/bin/activate   # system site = hailo_platform
-    pip install opencv-python numpy scipy
+    pip install opencv-python numpy scipy motmetrics pandas
 
-**2. Run:**
+Copy into the `drone_detection` folder on the Pi (USB stick or `scp`): `skyguard.hef`, `crop_640.hef`,
+`test_sample_clean/` and `evaluation.py`. Check the files:
+
+    hailortcli parse-hef skyguard.hef      # input 640x640x3, output an NMS layer
+    hailortcli run skyguard.hef            # raw chip fps, without video decode or tracker
+
+### 5. Run and score on the Pi
 
     H="--backend hailo --hef skyguard.hef --crop-hef crop_640.hef"
-    python pi_run.py video.mp4 $H                  # one video
-    python pi_run.py data $H --out results         # folder of <video>/video.mp4
-    python pi_run.py 0 $H                          # live camera
-    python pi_run.py video.mp4 $H --realtime       # feed at the video's own fps
+    python pi_run.py test_sample_clean $H --out results                   # all practice videos
+    python evaluation.py --gt_dir test_sample_clean --pred_dir results    # the score (MOTA, IDF1, F1, ...)
 
-Three threads overlap: read, whole-frame model, finish (crops + shape layer + booster/keeper + tracker).
-It prints end-to-end fps and ms per stage; the slowest thread is the fps limit (50 fps = 20 ms).
-Results go to `results/<video folder name>.txt`. The shape layer is CPU work: about 8 ms/frame at 480 px on the Mac, likely
-2-3x more on the Pi 5. If the finish thread is the limit, try `--layer-width 320` and re-check the score.
-If 1280 px is too slow on the Hailo, export at 960 or 640 and compare fps and scores.
+    python pi_run.py video.mp4 $H                  # one video
+    python pi_run.py 0 $H                          # live camera
+    python pi_run.py video.mp4 $H --realtime       # feed frames at the video's own fps, like a camera
+
+Three threads overlap: read, whole-frame model, finish (crops + shape layer + booster/keeper + tracker). Per video it prints
+end-to-end fps and ms per stage; the slowest thread is the fps limit (50 fps = 20 ms per frame).
+Results go to `results/<video folder name>.txt`, the competition format.
+
+What to expect and what to try:
+- The score will be somewhat below 0.883: the whole frame runs at 640 instead of 1280, and both models in 8-bit.
+- Finish thread too slow: the shape layer is CPU work (about 8 ms/frame at 480 px on an M5 Mac, likely 2-3x on the Pi 5);
+  try `--layer-width 320` and re-check the score.
+- Model thread too slow: compile with `--performance`; if it is fast with room to spare, try the whole frame at 960.
+- `--simple` runs the old pipeline (no shape layer, no fine-tuned crops) with only `--hef`, for comparison.
 
 ## Training
 
