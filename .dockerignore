@@ -1,0 +1,19 @@
+.git
+.venv
+**/__pycache__
+**/*.pyc
+Anti-UAV-RGBT training data
+hackathon_dataset
+test_sample_clean
+drone_data
+runs
+preds
+demo_out
+docker-output
+*.pt
+*.pth
+*.onnx
+*.hef
+*.mp4
+*.avi
+*.mov

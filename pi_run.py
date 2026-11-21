@@ -161,6 +161,8 @@ if __name__ == "__main__":
     p.add_argument("--crop-hef", default="crop_640.hef", help="Hailo: crop model, compiled at 640x640")
     p.add_argument("--imgsz", type=int, default=1280, help="whole-frame size (torch backend; on Hailo it is fixed by the .hef)")
     p.add_argument("--layer-width", type=int, default=480)
+    p.add_argument("--layers", default="motion,bg,shape",
+                   help="consensus cues: comma-separated motion,bg,shape (default: all three)")
     p.add_argument("--device", default=None)
     p.add_argument("--dets", default="", help="folder of cached whole-frame detections (run_video.py output) instead of the model")
     p.add_argument("--simple", action="store_true", help="old pipeline: no shape layer, plain 1x crops with the whole-frame model")
@@ -169,6 +171,10 @@ if __name__ == "__main__":
                    "and 101 -> 87 wrong boxes in a test, but one re-entry after both drones left got the other number)")
     p.add_argument("--out", default="results")
     a = p.parse_args()
+    layer_names = tuple(x.strip() for x in a.layers.split(",") if x.strip())
+    invalid_layers = set(layer_names) - {"motion", "bg", "shape"}
+    if invalid_layers or not layer_names:
+        p.error("--layers must contain one or more of: motion,bg,shape")
     if a.backend == "hailo":
         from hailo_platform import VDevice
         params = VDevice.create_params()
@@ -186,7 +192,8 @@ if __name__ == "__main__":
     if a.simple:
         booster = Booster(cb, crop_scale=1.0, crop_imgsz=320, use_layers=False)
     else:
-        booster = Booster(cb, crop_scale=2.0, crop_imgsz=320, layer_width=a.layer_width, cmc=a.cmc)
+        booster = Booster(cb, crop_scale=2.0, crop_imgsz=320, layer_width=a.layer_width, cmc=a.cmc,
+                          layers=layer_names)
     os.makedirs(a.out, exist_ok=True)
     if os.path.isdir(a.source):
         for v in sorted(glob.glob(os.path.join(a.source, "*", "video.mp4"))):

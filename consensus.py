@@ -16,19 +16,29 @@ class Consensus:
         self.prev = []  # previous frame's blob centres (work coords)
         self.mask = None
 
-    def step(self, L, scale):
+    def step(self, L, scale, layers=("motion", "bg", "shape")):
         """L: dict from LayerMaker.step; scale: work/full (LayerMaker.s). returns [(x1,y1,x2,y2,score)] full-res"""
         p = self.p
-        motion = np.maximum(L["short"], L["long"]) > p["t_motion"]
-        bg = L["bg"] > p["t_bg"]; shape = L["shape"] > p["t_shape"]
-        votes = motion.astype(np.uint8) + bg + shape
+        cues = []
+        evidence_maps = []
+        if "motion" in layers:
+            motion = np.maximum(L["short"], L["long"])
+            cues.append(motion > p["t_motion"]); evidence_maps.append(motion)
+        if "bg" in layers:
+            cues.append(L["bg"] > p["t_bg"]); evidence_maps.append(L["bg"])
+        if "shape" in layers:
+            cues.append(L["shape"] > p["t_shape"]); evidence_maps.append(L["shape"])
+        if not cues:
+            raise ValueError("At least one consensus layer must be enabled")
+        votes = np.sum(cues, axis=0, dtype=np.uint8)
         near = L["track"] > 40
-        m = (votes >= p["need"]) | (near & (votes >= p["need_near"]))
+        need = min(p["need"], len(cues))
+        m = (votes >= need) | (near & (votes >= p["need_near"]))
         m = m.astype(np.uint8) * 255
         m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
         self.mask = m
         n, lab, st, cen = cv2.connectedComponentsWithStats(m, 8)
-        H, W = m.shape; evid = (L["short"].astype(np.float32) + L["long"] + L["bg"] + L["shape"]) / 4
+        H, W = m.shape; evid = np.mean(np.stack(evidence_maps).astype(np.float32), axis=0)
         cand = []
         for i in range(1, n):
             x, y, w, h, area = st[i]

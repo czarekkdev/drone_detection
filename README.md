@@ -315,6 +315,22 @@ but one re-entry got the wrong number), higher output thresholds (0.1+: worse).
 Put the pretrained weights at `../pretrained/drone-detection-yolov11/best.pt` (download from the Hugging Face link above).
 Data is not in this repo: `../test_sample_clean/<video>/video.mp4 (+ gt/gt.txt)`, `../hackathon_dataset`, Anti-UAV-RGBT.
 
+### Run the PyTorch pipeline in Docker
+
+Docker provides an isolated CPU-based PyTorch environment for running the video pipeline. Install Docker Desktop on Mac/Windows or Docker Engine with the Compose plugin on Linux, then start in the repository folder. The source tree, model folder and sample videos are mounted into the container; they are not copied into the image.
+
+Build the image once:
+
+    docker compose build
+
+Run the boosted pipeline on the sample set:
+
+    docker compose run --rm detector python pipeline_boost.py --videos /videos --out /output/boost --weights /models/drone-detection-yolov11/best.pt --no-motion --layer-width 480 --verify --keeper2 --agree-boost 0.1 --boost-to 0.65 --crop-scale 2
+
+Results are written to `docker-output/boost` on your computer. To process a different folder, edit the `./test_sample_clean:/videos:ro` mount in `compose.yaml` to point to that folder, or change the mount target and `--videos` path together. For example, map `./my_videos:/videos:ro` and keep `--videos /videos`.
+
+This container runs the PyTorch backend on CPU. It does not include Hailo's Dataflow Compiler or HailoRT and cannot create `.hef` files or access an AI HAT+ device. Use the Linux/WSL2 compiler instructions below to create HEFs, and the Pi setup for Hailo runtime.
+
 ## Run
 
 Demo with switchable views:

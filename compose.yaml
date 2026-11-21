@@ -1,0 +1,11 @@
+services:
+  detector:
+    build: .
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+      - ./pretrained:/models:ro
+      - ./test_sample_clean:/videos:ro
+      - ./docker-output:/output
+    environment:
+      YOLO_CONFIG_DIR: /tmp/ultralytics

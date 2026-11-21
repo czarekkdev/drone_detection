@@ -16,6 +16,7 @@ preds/
 code/preds/
 demo_out/
 code/demo_out/
+docker-output/
 results/
 
 # Model weights and compiler artifacts
