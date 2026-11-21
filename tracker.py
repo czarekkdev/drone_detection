@@ -177,7 +177,7 @@ class TwoDroneTracker:
         self.tentative = [t for i, t in enumerate(self.tentative) if i not in set(ut3)]
         for k in ud3:
             d = dets[left[k]]
-            if INSIDE and any(_inside(d, a.box()) >= INSIDE for a in self.active):
+            if INSIDE and any(max(_inside(d, a.box()), _inside(a.box(), d)) >= INSIDE for a in self.active):
                 continue
             if d[4] >= P["new"]:
                 self.tentative.append(Track(d[:4], d[4], frame, feats[left[k]]))
@@ -203,10 +203,12 @@ class TwoDroneTracker:
                     backfill += [(f, i, b, c) for f, b, c in t.hist if f != frame and self.backfill]
                     t.hist = []
         if MERGE and len(self.active) > 1:
-            for a in sorted(self.active, key=lambda a: a.hits):
-                for b in self.active:
-                    if b is not a and a in self.active and a.hits <= b.hits and _inside(a.box(), b.box()) >= INSIDE:
-                        self.active.remove(a); self.lost[a.id] = a; break
+            # two tracks on one drone (either box mostly inside the other): a track that is only coasting (its drone
+            # not seen this frame) gives way to one that is seen; otherwise the one seen for fewer frames gives way
+            a, b = self.active[0], self.active[1]
+            if max(_inside(a.box(), b.box()), _inside(b.box(), a.box())) >= INSIDE:
+                drop = a if (a.miss > 0) > (b.miss > 0) else b if (b.miss > 0) > (a.miss > 0) else min((a, b), key=lambda t: t.hits)
+                self.active.remove(drop); self.lost[drop.id] = drop
         # retire long-missing actives to the lost list
         for t in list(self.active):
             if t.miss > P["coast"]:
