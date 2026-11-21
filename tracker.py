@@ -12,6 +12,7 @@ HANDOVER = True    # a newly confirmed track takes over the number of a same-siz
                    # Anti-UAV 67 videos: ID switches 63 -> 53; practice videos unchanged
 INSIDE = 0.7       # a box lying this much inside a tracked drone's box can't start a new track (part of the same drone)
 MERGE = True       # two tracks on the same drone (one box INSIDE the other): keep the one seen longer, drop the other
+SAME_SPOT = 0.5    # two output boxes whose centres are closer than this x the bigger box's size = same spot: show one
 MIN_SHOW = 0.05    # don't output boxes below this confidence (tracking continues underneath). Practice 0.8832 -> 0.8848,
                    # Anti-UAV 0.631 -> 0.635 (not tuned there); 0.1+ is worse (hides correct faint / coasting boxes)
 W_SIZE = 0.0       # weight of box size when deciding which lost drone came back (tested 0.5-1: no effect on practice)
@@ -225,7 +226,7 @@ class TwoDroneTracker:
         if INSIDE:  # safety net: never output two boxes on the same spot in one frame; keep the more confident one
             cur = sorted([o for o in out if o[0] == frame], key=lambda o: -o[3]); keep = []
             for o in cur:
-                if not any(max(_inside(o[2], k[2]), _inside(k[2], o[2])) >= INSIDE for k in keep):
+                if not any(max(_inside(o[2], k[2]), _inside(k[2], o[2])) >= INSIDE or _close(o[2], k[2]) for k in keep):
                     keep.append(o)
             out = [o for o in out if o[0] != frame] + keep
         return [o for o in out if o[3] >= MIN_SHOW]
@@ -281,6 +282,12 @@ def _inside(a, b):
     """share of box a's area that lies inside box b"""
     ix = max(0, min(a[2], b[2]) - max(a[0], b[0])); iy = max(0, min(a[3], b[3]) - max(a[1], b[1]))
     return ix * iy / max((a[2] - a[0]) * (a[3] - a[1]), 1e-9)
+
+
+def _close(a, b):
+    """centres closer than SAME_SPOT x the bigger box's size"""
+    d = np.hypot((a[0] + a[2] - b[0] - b[2]) / 2, (a[1] + a[3] - b[1] - b[3]) / 2)
+    return d < SAME_SPOT * max(a[2] - a[0], a[3] - a[1], b[2] - b[0], b[3] - b[1])
 
 
 def dedupe(rows):
