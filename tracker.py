@@ -10,6 +10,9 @@ REACQ_DIST = 1.5   # max distance from where it was last seen, in drone sizes (g
 HANDOVER = True    # a newly confirmed track takes over the number of a same-size track that is coasting on nothing
                    # (drone stopped dead / turned, prediction flew off): same drone keeps its number.
                    # Anti-UAV 67 videos: ID switches 63 -> 53; practice videos unchanged
+INSIDE = 0.7       # a box lying this much inside a tracked drone's box can't start a new track (part of the same drone)
+MERGE = True       # two tracks on the same drone (one box INSIDE the other): keep the one seen longer, drop the other
+W_SIZE = 0.0       # weight of box size when deciding which lost drone came back (tested 0.5-1: no effect on practice)
 HANDOVER_DIST = 3.0  # only if the new track is within this many drone sizes of where the coasting one was last SEEN
 
 
@@ -113,6 +116,8 @@ class TwoDroneTracker:
                 nx, ny = t.kf.x[0], t.kf.x[1]
                 c = self.w_pos * np.hypot(nx - lx, ny - ly) / np.hypot(self.W, self.H) * 4
                 c += 0.5 * abs(np.log(max(t.aspect, .1) / max(L.aspect, .1)))
+                # size: the two drones usually differ in size (distance / model), and size changes slowly
+                c += W_SIZE * abs(np.log(max(t.kf.x[2] * t.kf.x[3], 1) / max(L.last_obs[2] * L.last_obs[3], 1)))
                 if t.feat is not None and L.feat is not None:
                     c += self.w_feat * feat_dist(t.feat, L.feat) * 4
             if c < best:
@@ -172,6 +177,8 @@ class TwoDroneTracker:
         self.tentative = [t for i, t in enumerate(self.tentative) if i not in set(ut3)]
         for k in ud3:
             d = dets[left[k]]
+            if INSIDE and any(_inside(d, a.box()) >= INSIDE for a in self.active):
+                continue
             if d[4] >= P["new"]:
                 self.tentative.append(Track(d[:4], d[4], frame, feats[left[k]]))
         # promote confirmed tentatives
@@ -195,6 +202,11 @@ class TwoDroneTracker:
                     t.id = i; self.lost.pop(i, None); self.active.append(t); self.tentative.remove(t)
                     backfill += [(f, i, b, c) for f, b, c in t.hist if f != frame and self.backfill]
                     t.hist = []
+        if MERGE and len(self.active) > 1:
+            for a in sorted(self.active, key=lambda a: a.hits):
+                for b in self.active:
+                    if b is not a and a in self.active and a.hits <= b.hits and _inside(a.box(), b.box()) >= INSIDE:
+                        self.active.remove(a); self.lost[a.id] = a; break
         # retire long-missing actives to the lost list
         for t in list(self.active):
             if t.miss > P["coast"]:
@@ -252,6 +264,12 @@ class TwoDroneTracker:
         a = (d[2] - d[0]) / max(d[3] - d[1], 1); t.aspect = 0.9 * t.aspect + 0.1 * a
         if feat is not None:
             t.feat = feat if t.feat is None else 0.9 * t.feat + 0.1 * feat
+
+
+def _inside(a, b):
+    """share of box a's area that lies inside box b"""
+    ix = max(0, min(a[2], b[2]) - max(a[0], b[0])); iy = max(0, min(a[3], b[3]) - max(a[1], b[1]))
+    return ix * iy / max((a[2] - a[0]) * (a[3] - a[1]), 1e-9)
 
 
 def dedupe(rows):
