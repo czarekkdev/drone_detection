@@ -12,6 +12,7 @@ L is a dict of 5 uint8 images (work size, default 960 wide):
 stack(L) -> HxWx5 array in a fixed order (ORDER)."""
 import cv2
 import numpy as np
+import time
 
 ORDER = ("short", "long", "bg", "track", "prev", "shape")
 
@@ -28,33 +29,49 @@ class LayerMaker:
         self.width, self.long_gap, self.alpha, self.gain = width, long_gap, bg_alpha, gain
         self.grays, self.Hs = [], []  # Hs[i]: homography grays[i] -> grays[i+1]
         self.bg = None; self.s = None; self.prev_feats = None
+        self.timing = {k: 0.0 for k in ("gray", "features", "alignment", "flow", "homography", "phase", "warp", "normalize", "shape", "track")}
+
+    def _timed(self, key, started):
+        self.timing[key] += time.perf_counter() - started
 
     def _h(self, src, dst, pts):
         if pts is not None and len(pts) >= 20:
+            started = time.perf_counter()
             nxt, st, _ = cv2.calcOpticalFlowPyrLK(src, dst, pts, None, winSize=(21, 21), maxLevel=3)
+            self._timed("flow", started)
             ok = st.ravel() == 1
             if ok.sum() >= 20:
+                started = time.perf_counter()
                 H, inl = cv2.findHomography(pts[ok], nxt[ok], cv2.RANSAC, 2.0)
+                self._timed("homography", started)
                 if H is not None and inl.sum() >= 15 and sane(H):
                     return H
+        started = time.perf_counter()
         (dx, dy), resp = cv2.phaseCorrelate(np.float32(src), np.float32(dst))  # plain-sky fallback
+        self._timed("phase", started)
         if resp < 0.1 or max(abs(dx), abs(dy)) > 40:  # nothing to lock on to: assume the camera held still
             dx = dy = 0.0
         return np.array([[1, 0, dx], [0, 1, dy], [0, 0, 1]], float)
 
     def _warp_to_now(self, k):
         """gray frame k steps back, warped into the current frame's coordinates (+ valid mask)"""
+        started = time.perf_counter()
         H = np.eye(3)
         for i in range(len(self.Hs) - k, len(self.Hs)):
             H = self.Hs[i] @ H
         src = self.grays[-1 - k]; h, w = src.shape
-        return cv2.warpPerspective(src, H, (w, h), borderMode=cv2.BORDER_REPLICATE), \
-            cv2.warpPerspective(np.ones_like(src), H, (w, h)) > 0
+        result = (cv2.warpPerspective(src, H, (w, h), borderMode=cv2.BORDER_REPLICATE),
+                  cv2.warpPerspective(np.ones_like(src), H, (w, h)) > 0)
+        self._timed("warp", started)
+        return result
 
     def _norm(self, d, valid):
+        started = time.perf_counter()
         d = d.astype(np.float32); d[~valid] = 0
         noise = np.median(d) * 1.4826 + 1.0
-        return np.clip(d / noise * self.gain / 4, 0, 255).astype(np.uint8)
+        result = np.clip(d / noise * self.gain / 4, 0, 255).astype(np.uint8)
+        self._timed("normalize", started)
+        return result
 
     def step(self, frame, pred_boxes=(), layers=("motion", "bg", "shape")):
         """Compute requested consensus cues only; retain the temporal state each cue needs."""
@@ -64,15 +81,21 @@ class LayerMaker:
         temporal = want_motion or want_bg
         if self.s is None:
             self.s = self.width / frame.shape[1]
+        started = time.perf_counter()
         g = cv2.GaussianBlur(cv2.cvtColor(cv2.resize(frame, None, fx=self.s, fy=self.s, interpolation=cv2.INTER_AREA),
                                           cv2.COLOR_BGR2GRAY), (3, 3), 0)
+        self._timed("gray", started)
         h, w = g.shape
         L = {}
         if temporal:
             if self.grays:
+                started = time.perf_counter()
                 self.Hs.append(self._h(self.grays[-1], g, self.prev_feats))
+                self._timed("alignment", started)
             self.grays.append(g)
+            started = time.perf_counter()
             self.prev_feats = cv2.goodFeaturesToTrack(g, 800, 0.01, 8)
+            self._timed("features", started)
             keep = self.long_gap + 1 if want_motion else 2
             self.grays = self.grays[-keep:]
             self.Hs = self.Hs[-(keep - 1):] if keep > 1 else []
@@ -96,18 +119,24 @@ class LayerMaker:
                 if self.bg is None:
                     self.bg = g.astype(np.float32)
                 else:
+                    started = time.perf_counter()
                     bgw = cv2.warpPerspective(self.bg, self.Hs[-1], (w, h),
                                               borderMode=cv2.BORDER_CONSTANT, borderValue=-1)
                     bgw[bgw < 0] = g[bgw < 0]
                     self.bg = (1 - self.alpha) * bgw + self.alpha * g
+                    self._timed("warp", started)
                 if n >= 1:
                     L["bg"] = self._norm(cv2.absdiff(g.astype(np.float32), self.bg), np.ones_like(g, bool))
                 else:
                     L["bg"] = np.zeros((h, w), np.uint8)
 
         if want_shape:
+            started = time.perf_counter()
             L["shape"] = brightness_shape(g)
+            self._timed("shape", started)
+        started = time.perf_counter()
         L["track"] = track_map((h, w), [tuple(v * self.s for v in b) for b in pred_boxes])
+        self._timed("track", started)
         return L
 
 

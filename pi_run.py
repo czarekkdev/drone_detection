@@ -149,6 +149,11 @@ def run(source, backend, booster, out_path, realtime=False, cached=None):
           f"finish {ms['finish']:.1f} = crops {bt['crops']:.1f} + shape layer {bt['layers']:.1f} + booster/keeper {bt['logic']:.2f} "
           f"+ tracker {ms['track']:.2f} ms/frame | limit = {slow} thread ({1000 / max(stages[slow], 1e-6):.0f} fps) | "
           f"latency {1000 * np.median(done_t['lat']):.0f} ms")
+    if booster.use_layers and n:
+        lt = booster.LM.timing
+        parts = " | ".join(f"{key} {1000 * value / n:.2f}" for key, value in lt.items())
+        print(f"  layer CPU ms/input-frame (amortized; align total includes flow/homography/phase): "
+              f"{parts}")
 
 
 if __name__ == "__main__":
