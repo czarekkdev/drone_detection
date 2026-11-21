@@ -192,51 +192,85 @@ so you need **two `.hef` files**: `skyguard.hef` (whole frame) and `crop_640.hef
 
 Status: **not tested on a real Pi yet** and 50 fps not measured yet. Expect small fixes on the first run.
 
-Overview (3 machines: Mac, a Linux PC for compiling, the Pi):
+Overview (Windows users can do steps 1-3 in WSL2; Mac users can export/calibrate on macOS and compile on Linux):
 
 | Step | Where | Result |
 |---|---|---|
-| 1. Export both models to ONNX | Mac (Python 3.12) | `best.onnx`, `epoch0.onnx` |
-| 2. Calibration images | Mac | `calib/` |
+| 1. Export both models to ONNX | Windows: WSL2 Ubuntu 22.04; Mac: Python 3.12 | `best.onnx`, `epoch0.onnx` |
+| 2. Calibration images | Windows: WSL2 Ubuntu 22.04; Mac: macOS | `calib/` |
 | 3. Compile | x86 Linux PC: Ubuntu 22.04, or Windows + WSL2 Ubuntu 22.04 (not the Mac, not the Pi) | `skyguard.hef`, `crop_640.hef` |
 | 4. Run + score | Raspberry Pi | fps per stage + MOTA |
 
 You need: the SkyGuard model (`pretrained/drone-detection-yolov11/best.pt`), the crop model (release v0.883 asset,
 `ft_1280_ep1_crop.pt`, here called `runs/ft_1280/weights/epoch0.pt`), `test_sample_clean/`, and the team's `evaluation.py`.
 
-### On Windows: do steps 1-3 inside WSL2
+### Windows: export, calibrate, and compile with WSL2
 
-On Windows everything up to the .hef happens in one place, **WSL2 with Ubuntu 22.04** (it counts as the x86 Linux PC):
+Hailo's compiler runs in Linux, so use one Ubuntu 22.04 WSL2 environment for all three build steps. The Windows native `code`, `pretrained`, `test_sample_clean`, and model folders are visible in WSL under `/mnt/c`. These commands assume you followed the Windows folder layout earlier, so the repo is at `C:\Users\<you>\drone detecting\code`.
 
-    wsl --install -d Ubuntu-22.04        # in PowerShell as admin, then restart and open "Ubuntu 22.04"
+In PowerShell (administrator), install WSL2 and Ubuntu 22.04. Restart if Windows asks, launch Ubuntu 22.04 from the Start menu, and complete its first-launch username setup:
 
-Inside Ubuntu, your Windows drive is `/mnt/c`, so a folder `C:\Users\<you>\drone detecting` is
-`"/mnt/c/Users/<you>/drone detecting"`. Then:
+    # Run this first in PowerShell as administrator if WSL2 is not installed yet:
+    # wsl --install -d Ubuntu-22.04
 
-    sudo apt update && sudo apt install -y python3.10 python3.10-venv python3.10-dev graphviz graphviz-dev git libgl1
-    git clone https://github.com/czarekkdev/drone_detection && cd drone_detection
-    D="/mnt/c/Users/<you>/drone detecting"         # folder with pretrained/, the crop model, test_sample_clean/
+    sudo apt update
+    sudo apt install -y python3.10 python3.10-venv python3.10-dev graphviz graphviz-dev git libgl1
+    D="/mnt/c/Users/<you>/drone detecting"   # replace <you> with your Windows account folder name
+    cd "$D/code"
+    test -f "$D/pretrained/drone-detection-yolov11/best.pt" && echo "SkyGuard weights found"
+    test -f "$D/code/runs/ft_1280/weights/epoch0.pt" && echo "Crop weights found"
+    test -d "$D/test_sample_clean" && echo "Practice videos found"
 
-    # step 1 (export) + step 2 (calibration) in their own environment
-    python3.10 -m venv ~/export && source ~/export/bin/activate
+If `code` is not cloned yet, clone it from PowerShell as described in the Windows setup section, or run `git clone https://github.com/czarekkdev/drone_detection "$D/code"` from WSL. Keep the quoted paths as shown because the parent folder name contains a space.
+
+#### 1. Export both models to ONNX
+
+Use a separate Python 3.10 environment for exporting. Both models are exported at 640x640; the crop model receives 640x640 crops at runtime, and 640 is the recommended safe starting point for the whole-frame Hailo model.
+
+    python3.10 -m venv ~/onnx310
+    source ~/onnx310/bin/activate
+    python -m pip install --upgrade pip
     pip install ultralytics onnx onnxslim onnxruntime
     python -c "from ultralytics import YOLO; YOLO('$D/pretrained/drone-detection-yolov11/best.pt').export(format='onnx', imgsz=640, opset=11)"
     python -c "from ultralytics import YOLO; YOLO('$D/code/runs/ft_1280/weights/epoch0.pt').export(format='onnx', imgsz=640, opset=11)"
+
+Ultralytics writes each ONNX file next to its `.pt` file. Copy both into the repo build folder with clear names, then confirm they exist:
+
+    cp "$D/pretrained/drone-detection-yolov11/best.onnx" "$D/code/best.onnx"
+    cp "$D/code/runs/ft_1280/weights/epoch0.onnx" "$D/code/epoch0.onnx"
+    ls -lh "$D/code/best.onnx" "$D/code/epoch0.onnx"
+
+#### 2. Make calibration images
+
+Still in the `~/onnx310` environment and repo folder, create 600 representative calibration images from the practice videos:
+
+    cd "$D/code"
     python make_calib.py --videos "$D/test_sample_clean" --out calib --n 600
-    cp "$D/pretrained/drone-detection-yolov11/best.onnx" "$D/code/runs/ft_1280/weights/epoch0.onnx" .
+    ls calib | head
     deactivate
 
-    # step 3 (compile): put the Hailo .whl files you downloaded (Windows Downloads = /mnt/c/Users/<you>/Downloads) here
-    python3.10 -m venv ~/hailo && source ~/hailo/bin/activate
-    pip install /mnt/c/Users/<you>/Downloads/hailo_dataflow_compiler-*.whl /mnt/c/Users/<you>/Downloads/hailo_model_zoo-*.whl
-    hailomz compile yolov11n --ckpt best.onnx   --hw-arch hailo8 --calib-path calib/ --classes 1 && mv yolov11n.hef skyguard.hef
-    hailomz compile yolov11n --ckpt epoch0.onnx --hw-arch hailo8 --calib-path calib/ --classes 1 && mv yolov11n.hef crop_640.hef
-    cp skyguard.hef crop_640.hef "$D/"             # now they are in the Windows folder too
+If `make_calib.py` is missing, update the repo first (`git pull`) or restore it with `git checkout origin/main -- make_calib.py`. Keep `best.onnx`, `epoch0.onnx`, and `calib/` together in `code`; the compile commands below read them from there.
 
-Version matching (below, step 3) applies the same way. Then copy the two `.hef` files, `test_sample_clean/` and `evaluation.py`
-to the Pi (USB stick, or `scp` from PowerShell) and continue with step 4. The Mac and Windows steps make identical files.
+#### 3. Install the matching Hailo compiler and compile
 
-### 1. Export to ONNX (Mac)
+On the Pi, check the installed HailoRT release with `hailortcli --version`. Download the Hailo-8 Dataflow Compiler and Model Zoo wheels for that same software release using the Hailo Developer Zone. In Windows, save the wheels to `C:\Users\<you>\Downloads`; WSL sees that folder under `/mnt/c/Users/<you>/Downloads`.
+
+    cd "$D/code"
+    python3.10 -m venv ~/hailo310
+    source ~/hailo310/bin/activate
+    pip install /mnt/c/Users/<you>/Downloads/hailo_dataflow_compiler-*.whl
+    pip install /mnt/c/Users/<you>/Downloads/hailo_model_zoo-*.whl
+    hailo --version
+    hailomz --help
+    hailomz compile yolov11n --ckpt best.onnx --hw-arch hailo8 --calib-path calib/ --classes 1
+    mv yolov11n.hef skyguard.hef
+    hailomz compile yolov11n --ckpt epoch0.onnx --hw-arch hailo8 --calib-path calib/ --classes 1
+    mv yolov11n.hef crop_640.hef
+    cp skyguard.hef crop_640.hef "$D/"
+
+The resulting `.hef` files are copied to the Windows project folder. Transfer them, `test_sample_clean/`, and the team's `evaluation.py` to the Pi (USB stick or `scp` from PowerShell), then follow steps 4-5 below. You can also run these same export and calibration commands on macOS using the separate Mac instructions that follow; Hailo compilation itself still needs Linux/WSL2.
+
+### Mac alternative: export to ONNX (macOS)
 
 The ONNX tools (onnxruntime) have no build for Python 3.15 yet, so use a separate **Python 3.12** environment just for this:
 
@@ -251,7 +285,7 @@ This writes `best.onnx` next to `best.pt` and `epoch0.onnx` next to `epoch0.pt`.
 Both are exported at **640**: the crop model always gets 640x640 (320 px crops enlarged 2x). For the whole-frame model 640
 is the safe start; 1280 is about 4x the work and unlikely to reach 50 fps on the Hailo-8, 960 is the middle option.
 
-### 2. Calibration images (Mac, in this repo folder)
+### Mac alternative: make calibration images (macOS, in this repo folder)
 
 The compiler converts the models to 8-bit and needs real-looking frames to do that:
 
@@ -289,12 +323,16 @@ the **Dataflow Compiler** wheel (`hailo_dataflow_compiler-<ver>-py3-none-linux_x
 
 #### Optional 960px whole-frame model (Pi only)
 
-Keep the existing HEF and Mac setting unchanged. A 960px HEF is a separate Pi model selected explicitly with `--hef`; Hailo uses the input size compiled into the HEF, so `--imgsz` does not resize it. The 960px Mac test was faster than 1280 but lost accuracy, so score this Pi build before adopting it.
+Keep the existing HEF and the normal Windows/Mac settings unchanged. A 960px HEF is a separate Pi model selected explicitly with `--hef`; Hailo uses the input size compiled into the HEF, so `--imgsz` does not resize it. The 960px Mac test was faster than 1280 but lost accuracy, so score this Pi build before adopting it.
 
-Export SkyGuard at 960, copy the Model Zoo's `yolov11n.yaml` to `yolov11n_960.yaml`, set its `preprocessing.input_shape` to `[960, 960, 3]`, then compile it on the same x86 Linux/WSL2 environment and Hailo software release as the existing HEFs:
+For Windows, run these commands inside the same Ubuntu WSL2 window used above, with `$D` set and the Hailo environment active. Export SkyGuard at 960, copy the Model Zoo's `yolov11n.yaml` to `yolov11n_960.yaml`, set its `preprocessing.input_shape` to `[960, 960, 3]`, then compile it on the same x86 Linux/WSL2 environment and Hailo software release as the existing HEFs:
 
+    cd "$D/code"
+    source ~/onnx310/bin/activate
     python -c "from ultralytics import YOLO; YOLO('$D/pretrained/drone-detection-yolov11/best.pt').export(format='onnx', imgsz=960, opset=11)"
-    cp best.onnx best_960.onnx
+    cp "$D/pretrained/drone-detection-yolov11/best.onnx" best_960.onnx
+    deactivate
+    source ~/hailo310/bin/activate
     hailomz compile --ckpt best_960.onnx --yaml yolov11n_960.yaml --hw-arch hailo8 --calib-path calib/ --classes 1
     mv yolov11n.hef skyguard_960.hef
 
