@@ -17,7 +17,7 @@ Prints: end-to-end fps, average ms per stage (read / whole-frame model / crops /
 import argparse, os, glob, queue, threading, time
 import cv2
 import numpy as np
-from tracker import TwoDroneTracker
+from tracker import TwoDroneTracker, dedupe_lines
 from boost import Booster
 
 
@@ -138,7 +138,7 @@ def run(source, backend, booster, out_path, realtime=False, cached=None):
     for th in ths:
         th.join()
     total = time.time() - t_start; n = done_t["n"]
-    lines.sort(key=lambda l: (int(l.split(",")[0]), int(l.split(",")[1])))
+    lines = dedupe_lines(lines)
     open(out_path, "w").write("\n".join(lines) + "\n")
     ms = {k: 1000 * np.mean(v) if v else 0 for k, v in t.items()}
     bt = {k: 1000 * np.mean(v) if v else 0 for k, v in booster.t.items()}

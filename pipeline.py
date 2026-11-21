@@ -9,7 +9,7 @@ python pipeline.py --videos ../test_sample_clean --dets preds/hf_skyguard --moti
 import argparse, os, glob, time
 import cv2, numpy as np, torch
 from ultralytics import YOLO
-from tracker import TwoDroneTracker
+from tracker import TwoDroneTracker, dedupe_lines
 
 p = argparse.ArgumentParser()
 p.add_argument("--videos", required=True); p.add_argument("--out", required=True)
@@ -114,6 +114,6 @@ for vdir in sorted(glob.glob(os.path.join(a.videos, "*/"))):
                 nmot += len(centers); dets = merge(dets, run_crops(img, centers, a.crop))
         for f2, i, (x1, y1, x2, y2), c in T.step(n, dets):
             lines.append(f"{f2},{i},{x1:.2f},{y1:.2f},{x2 - x1:.2f},{y2 - y1:.2f},{c:.4f}")
-    lines.sort(key=lambda l: (int(l.split(",")[0]), int(l.split(",")[1])))
+    lines = dedupe_lines(lines)
     open(os.path.join(a.out, name + ".txt"), "w").write("\n".join(lines) + "\n")
     print(f"{name}: {n} frames, prediction crops/frame {npred / n:.2f}, motion crops/frame {nmot / n:.2f}, {n / (time.time() - t0):.1f} fps")

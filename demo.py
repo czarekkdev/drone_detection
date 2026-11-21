@@ -154,5 +154,7 @@ while True:
             paused = not paused
 writer.release(); cap.release(); cv2.destroyAllWindows()
 lines = sorted(set(lines), key=lambda l: (int(l.split(",")[0]), int(l.split(",")[1])))
+from tracker import dedupe_lines
+lines = dedupe_lines(lines)
 open(os.path.join(a.out, name + ".txt"), "w").write("\n".join(lines) + "\n")
 print(f"{n} frames, {n / max(time.time() - t0, 1e-6):.1f} fps. Saved {a.out}/{name}.mp4 and {a.out}/{name}.txt")

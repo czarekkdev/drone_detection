@@ -7,6 +7,10 @@ from scipy.optimize import linear_sum_assignment
 REACQ_GAP = 30     # frames: how long after losing a drone we may take it back under its own id
 REACQ_CONF = 0.20  # min box confidence for re-acquisition
 REACQ_DIST = 1.5   # max distance from where it was last seen, in drone sizes (grows 15%/frame of gap)
+HANDOVER = True    # a newly confirmed track takes over the number of a same-size track that is coasting on nothing
+                   # (drone stopped dead / turned, prediction flew off): same drone keeps its number.
+                   # Anti-UAV 67 videos: ID switches 63 -> 53; practice videos unchanged
+HANDOVER_DIST = 3.0  # only if the new track is within this many drone sizes of where the coasting one was last SEEN
 
 
 class KF:
@@ -174,6 +178,18 @@ class TwoDroneTracker:
         backfill = []
         for t in list(self.tentative):
             if t.hits >= P["confirm"]:
+                if HANDOVER:
+                    tw, th = t.kf.x[2], t.kf.x[3]
+                    coast = [a for a in self.active if a.miss >= 1
+                             and abs(np.log(max(tw * th, 1) / max(a.kf.x[2] * a.kf.x[3], 1))) < 1.0
+                             and np.hypot(a.last_obs[0] - t.kf.x[0], a.last_obs[1] - t.kf.x[1])
+                             < HANDOVER_DIST * max(a.last_obs[2], a.last_obs[3], 12) * (1 + 0.15 * a.miss)]
+                    if coast:
+                        a = min(coast, key=lambda a: np.hypot(a.last_obs[0] - t.kf.x[0], a.last_obs[1] - t.kf.x[1]))
+                        self.active.remove(a); t.id = a.id; self.active.append(t); self.tentative.remove(t)
+                        backfill += [(f, t.id, b, c) for f, b, c in t.hist if f != frame and self.backfill]
+                        t.hist = []
+                        continue
                 i = self._assign_id(t, frame)
                 if i is not None:
                     t.id = i; self.lost.pop(i, None); self.active.append(t); self.tentative.remove(t)
@@ -222,6 +238,27 @@ class TwoDroneTracker:
         a = (d[2] - d[0]) / max(d[3] - d[1], 1); t.aspect = 0.9 * t.aspect + 0.1 * a
         if feat is not None:
             t.feat = feat if t.feat is None else 0.9 * t.feat + 0.1 * feat
+
+
+def dedupe(rows):
+    """rows: (frame, id, x1, y1, x2, y2, conf, ...). Keep one box per (frame, id), the most confident one
+    (after a handover the back-filled frames can repeat a number that was coasting in those frames)."""
+    best = {}
+    for r in rows:
+        k = (r[0], r[1])
+        if k not in best or r[6] > best[k][6]:
+            best[k] = r
+    return sorted(best.values(), key=lambda r: (r[0], r[1]))
+
+
+def dedupe_lines(lines):
+    """same for result-file lines 'frame,id,left,top,w,h,conf', sorted by frame then id"""
+    best = {}
+    for l in lines:
+        v = l.split(","); k = (int(v[0]), int(v[1]))
+        if k not in best or float(v[6]) > float(best[k].split(",")[6]):
+            best[k] = l
+    return [best[k] for k in sorted(best)]
 
 
 def feat_dist(a, b):

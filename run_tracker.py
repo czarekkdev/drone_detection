@@ -1,7 +1,7 @@
 """Offline: apply the tracker to a folder of detection result files.
 python run_tracker.py --dets preds/hf_skyguard --out preds/trk [--videos test_sample_clean  (enables appearance re-id)]"""
 import argparse, os, glob
-from tracker import TwoDroneTracker, appearance
+from tracker import TwoDroneTracker, appearance, dedupe_lines
 
 p = argparse.ArgumentParser()
 p.add_argument("--dets", required=True); p.add_argument("--out", required=True)
@@ -35,5 +35,5 @@ for f in sorted(glob.glob(os.path.join(a.dets, "*.txt"))):
                 feats = [appearance(img, d[:4]) if d[4] >= a.low else None for d in dets]
         for f2, i, (x1, y1, x2, y2), c in T.step(fr, dets, feats):
             lines.append(f"{f2},{i},{x1:.2f},{y1:.2f},{x2 - x1:.2f},{y2 - y1:.2f},{c:.4f}")
-    lines.sort(key=lambda l: (int(l.split(",")[0]), int(l.split(",")[1])))
+    lines = dedupe_lines(lines)
     open(os.path.join(a.out, name + ".txt"), "w").write("\n".join(lines) + "\n")
