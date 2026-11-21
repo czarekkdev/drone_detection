@@ -56,40 +56,57 @@ class LayerMaker:
         noise = np.median(d) * 1.4826 + 1.0
         return np.clip(d / noise * self.gain / 4, 0, 255).astype(np.uint8)
 
-    def step(self, frame, pred_boxes=()):
+    def step(self, frame, pred_boxes=(), layers=("motion", "bg", "shape")):
+        """Compute requested consensus cues only; retain the temporal state each cue needs."""
+        want_motion = "motion" in layers
+        want_bg = "bg" in layers
+        want_shape = "shape" in layers
+        temporal = want_motion or want_bg
         if self.s is None:
             self.s = self.width / frame.shape[1]
         g = cv2.GaussianBlur(cv2.cvtColor(cv2.resize(frame, None, fx=self.s, fy=self.s, interpolation=cv2.INTER_AREA),
                                           cv2.COLOR_BGR2GRAY), (3, 3), 0)
         h, w = g.shape
-        if self.grays:
-            self.Hs.append(self._h(self.grays[-1], g, self.prev_feats))
-        self.grays.append(g); self.prev_feats = cv2.goodFeaturesToTrack(g, 800, 0.01, 8)
-        keep = self.long_gap + 1
-        self.grays, self.Hs = self.grays[-keep:], self.Hs[-(keep - 1):] if keep > 1 else []
-        zero = np.zeros((h, w), np.uint8); L = {}
-        n = len(self.grays) - 1  # how many past frames we have
-        if n >= 2:
-            a1, v1 = self._warp_to_now(1); a2, v2 = self._warp_to_now(2)
-            L["short"] = self._norm(np.minimum(cv2.absdiff(g, a1), cv2.absdiff(g, a2)), v1 & v2)
-            L["prev"] = a1
-        else:
-            L["short"] = zero; L["prev"] = g.copy()
-        if n >= self.long_gap:
-            al, vl = self._warp_to_now(self.long_gap)
-            L["long"] = self._norm(cv2.absdiff(g, al), vl)
-        else:
-            L["long"] = zero
-        # background: carry the old background along with the camera, then blend in the new frame
-        if self.bg is None:
-            self.bg = g.astype(np.float32)
-        else:
-            Hl = self.Hs[-1]
-            bgw = cv2.warpPerspective(self.bg, Hl, (w, h), borderMode=cv2.BORDER_CONSTANT, borderValue=-1)
-            bgw[bgw < 0] = g[bgw < 0]
-            self.bg = (1 - self.alpha) * bgw + self.alpha * g
-        L["bg"] = self._norm(cv2.absdiff(g.astype(np.float32), self.bg), np.ones_like(g, bool)) if n >= 1 else zero
-        L["shape"] = brightness_shape(g)
+        L = {}
+        if temporal:
+            if self.grays:
+                self.Hs.append(self._h(self.grays[-1], g, self.prev_feats))
+            self.grays.append(g)
+            self.prev_feats = cv2.goodFeaturesToTrack(g, 800, 0.01, 8)
+            keep = self.long_gap + 1 if want_motion else 2
+            self.grays = self.grays[-keep:]
+            self.Hs = self.Hs[-(keep - 1):] if keep > 1 else []
+            n = len(self.grays) - 1  # how many past frames are available
+
+            if want_motion:
+                zero = np.zeros((h, w), np.uint8)
+                if n >= 2:
+                    a1, v1 = self._warp_to_now(1); a2, v2 = self._warp_to_now(2)
+                    L["short"] = self._norm(np.minimum(cv2.absdiff(g, a1), cv2.absdiff(g, a2)), v1 & v2)
+                else:
+                    L["short"] = zero
+                if n >= self.long_gap:
+                    al, vl = self._warp_to_now(self.long_gap)
+                    L["long"] = self._norm(cv2.absdiff(g, al), vl)
+                else:
+                    L["long"] = zero
+
+            if want_bg:
+                # Warp the running background with the camera, then blend in the new frame.
+                if self.bg is None:
+                    self.bg = g.astype(np.float32)
+                else:
+                    bgw = cv2.warpPerspective(self.bg, self.Hs[-1], (w, h),
+                                              borderMode=cv2.BORDER_CONSTANT, borderValue=-1)
+                    bgw[bgw < 0] = g[bgw < 0]
+                    self.bg = (1 - self.alpha) * bgw + self.alpha * g
+                if n >= 1:
+                    L["bg"] = self._norm(cv2.absdiff(g.astype(np.float32), self.bg), np.ones_like(g, bool))
+                else:
+                    L["bg"] = np.zeros((h, w), np.uint8)
+
+        if want_shape:
+            L["shape"] = brightness_shape(g)
         L["track"] = track_map((h, w), [tuple(v * self.s for v in b) for b in pred_boxes])
         return L
 

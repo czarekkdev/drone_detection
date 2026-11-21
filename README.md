@@ -655,6 +655,13 @@ Copy into the `drone_detection` folder on the Pi (USB stick or `scp`): `skyguard
     python pi_run.py 0 $H                          # live camera
     python pi_run.py video.mp4 $H --realtime       # feed frames at the video's own fps, like a camera
 
+Compare consensus cues while keeping both HEFs enabled. `--layers motion` uses the short/long motion maps;
+add `bg` and then `shape` to compare the extra work and score. Unselected cues are skipped during frame processing.
+
+    python pi_run.py test_sample_clean $H --layers motion --out results_motion
+    python pi_run.py test_sample_clean $H --layers motion,bg --out results_motion_bg
+    python pi_run.py test_sample_clean $H --layers motion,bg,shape --out results_all_layers
+
 Three threads overlap: read, whole-frame model, finish (crops + shape layer + booster/keeper + tracker). Per video it prints
 end-to-end fps and ms per stage; the slowest thread is the fps limit (50 fps = 20 ms per frame).
 Results go to `results/<video folder name>.txt`, the competition format.

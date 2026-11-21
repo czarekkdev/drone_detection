@@ -78,7 +78,8 @@ class Booster:
         dets = list(dets); preds = T.predictions(); low = T.p["low"]
         if self.cmc and self.use_layers:  # shape layer first: it measures the camera motion, then the tracker follows it
             t1 = time.time()
-            L = self.LM.step(img, [pb for _, pb, _ in preds]); cbl = self.CS.step(L, self.LM.s, self.layers)
+            L = self.LM.step(img, [pb for _, pb, _ in preds], self.layers)
+            cbl = self.CS.step(L, self.LM.s, self.layers)
             if len(self.LM.Hs) and len(self.LM.grays) > 1:
                 s = self.LM.s; S = np.diag([s, s, 1.0])
                 T.apply_camera(np.linalg.inv(S) @ self.LM.Hs[-1] @ S)
@@ -94,7 +95,7 @@ class Booster:
         t1 = time.time(); self.t["crops"].append(t1 - t0)
         if not self.use_layers:
             return dets
-        L = self.LM.step(img, [pb for _, pb, _ in preds])  # 2 shape layer
+        L = self.LM.step(img, [pb for _, pb, _ in preds], self.layers)  # 2 selected consensus cues
         cbl = self.CS.step(L, self.LM.s, self.layers)
         t2 = time.time(); self.t["layers"].append(t2 - t1)
         return self._logic(dets, T, preds, low, cbl, t2)
