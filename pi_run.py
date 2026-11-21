@@ -163,6 +163,8 @@ if __name__ == "__main__":
     p.add_argument("--layer-width", type=int, default=480)
     p.add_argument("--layers", default="motion,bg,shape",
                    help="consensus cues: comma-separated motion,bg,shape (default: all three)")
+    p.add_argument("--layer-every", type=int, default=1,
+                   help="compute layer cues once every N frames; detections/tracking still run each frame")
     p.add_argument("--device", default=None)
     p.add_argument("--dets", default="", help="folder of cached whole-frame detections (run_video.py output) instead of the model")
     p.add_argument("--simple", action="store_true", help="old pipeline: no shape layer, plain 1x crops with the whole-frame model")
@@ -177,6 +179,10 @@ if __name__ == "__main__":
     invalid_layers = set(layer_names) - {"motion", "bg", "shape"}
     if invalid_layers or not layer_names:
         p.error("--layers must contain one or more of: motion,bg,shape")
+    if a.layer_every < 1:
+        p.error("--layer-every must be at least 1")
+    if a.cmc and a.layer_every > 1:
+        p.error("--cmc requires --layer-every 1")
     if a.backend == "hailo":
         from hailo_platform import VDevice
         params = VDevice.create_params()
@@ -195,7 +201,7 @@ if __name__ == "__main__":
         booster = Booster(cb, crop_scale=1.0, crop_imgsz=320, use_layers=False)
     else:
         booster = Booster(cb, crop_scale=2.0, crop_imgsz=320, layer_width=a.layer_width, cmc=a.cmc,
-                          use_layers=not a.no_layers, layers=layer_names)
+                          use_layers=not a.no_layers, layers=layer_names, layer_every=a.layer_every)
     os.makedirs(a.out, exist_ok=True)
     if os.path.isdir(a.source):
         for v in sorted(glob.glob(os.path.join(a.source, "*", "video.mp4"))):

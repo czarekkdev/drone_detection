@@ -42,7 +42,7 @@ class Booster:
     def __init__(self, crop_backend, crop=320, crop_imgsz=320, crop_scale=2.0, layer_width=480,
                  verify=True, verify_below=0.5, verify_mult=0.3, agree_lo=0.1, boost_to=0.65,
                  keeper2=True, keeper_conf=0.25, keeper_max=5, use_layers=True, use_crops=True, cmc=False,
-                 layers=("motion", "bg", "shape")):
+                 layers=("motion", "bg", "shape"), layer_every=1):
         self.cb = crop_backend; self.crop, self.crop_imgsz, self.k = crop, crop_imgsz, crop_scale
         self.verify, self.vb, self.vm = verify, verify_below, verify_mult
         self.lo, self.hi = agree_lo, boost_to
@@ -50,6 +50,7 @@ class Booster:
         self.use_layers, self.use_crops = use_layers, use_crops
         self.cmc = cmc  # camera-motion compensation: shift the tracker with the camera (measured in layers.py)
         self.layers = tuple(layers)
+        self.layer_every = max(1, int(layer_every)); self.frame_no = 0
         self.lw = layer_width
         self.reset()
 
@@ -57,6 +58,7 @@ class Booster:
         """call at the start of each video"""
         self.LM = LY.LayerMaker(width=self.lw); self.CS = Consensus(near=60 * self.lw / 960)
         self.krun = {}; self.prev_bl = []
+        self.frame_no = 0
         self.t = {"crops": [], "layers": [], "logic": []}
 
     def _crops(self, img, centers):
@@ -75,8 +77,12 @@ class Booster:
         return out
 
     def step(self, img, dets, T):
+        self.frame_no += 1
+        layer_due = (self.frame_no - 1) % self.layer_every == 0
         dets = list(dets); preds = T.predictions(); low = T.p["low"]
         if self.cmc and self.use_layers:  # shape layer first: it measures the camera motion, then the tracker follows it
+            if not layer_due and self.layer_every > 1:
+                raise RuntimeError("--cmc requires --layer-every 1")
             t1 = time.time()
             L = self.LM.step(img, [pb for _, pb, _ in preds], self.layers)
             cbl = self.CS.step(L, self.LM.s, self.layers)
@@ -94,6 +100,9 @@ class Booster:
                 dets = merge(dets, self._crops(img, centers))
         t1 = time.time(); self.t["crops"].append(t1 - t0)
         if not self.use_layers:
+            return dets
+        if not layer_due:
+            self.t["layers"].append(0.0); self.t["logic"].append(0.0)
             return dets
         L = self.LM.step(img, [pb for _, pb, _ in preds], self.layers)  # 2 selected consensus cues
         cbl = self.CS.step(L, self.LM.s, self.layers)
@@ -146,14 +155,15 @@ class Booster:
                         continue
                     q = min(prv, key=lambda q: np.hypot((q[0] + q[2]) / 2 - bcx, (q[1] + q[3]) / 2 - bcy))
                     mx, my = bcx - (q[0] + q[2]) / 2, bcy - (q[1] + q[3]) / 2; ms = np.hypot(mx, my)
-                    if vs < 2 and ms < 2:
+                    if vs < 2 * self.layer_every and ms < 2 * self.layer_every:
                         ok_b = b; break
-                    if vs >= 2 and ms >= 1 and 0.5 <= ms / vs <= 1.5 and (mx * vx + my * vy) / (ms * vs) >= np.cos(np.pi / 4):
+                    sample_speed = vs * self.layer_every
+                    if sample_speed >= 2 and ms >= self.layer_every and 0.5 <= ms / sample_speed <= 1.5 and (mx * vx + my * vy) / (ms * vs) >= np.cos(np.pi / 4):
                         ok_b = b; break
                 if ok_b is not None:
                     cx, cy = (ok_b[0] + ok_b[2]) / 2, (ok_b[1] + ok_b[3]) / 2
                     dets.append((cx - pw / 2, cy - ph / 2, cx + pw / 2, cy + ph / 2, self.kconf))
-                    self.krun[tid] = self.krun.get(tid, 0) + 1
+                    self.krun[tid] = self.krun.get(tid, 0) + self.layer_every
                 else:
                     self.krun[tid] = self.kmax  # stop keeping as soon as the blob stops matching
         self.prev_bl = cbl

@@ -659,11 +659,14 @@ Compare consensus cues while keeping both HEFs enabled. `--layers motion` uses t
 add `bg` and then `shape` to compare the extra work and score. Unselected cues are skipped during frame processing.
 Use `--no-layers` to measure the two-model crop pipeline without layer processing; unlike `--simple`, it still
 uses the separate crop HEF and 2x crops.
+For a performance/accuracy compromise, `--layer-every 2` computes the selected cues every other frame while
+the whole-frame model, crop pass, and tracker still run on every frame. `--layer-width 320` further reduces CPU work.
 
     python pi_run.py test_sample_clean $H --no-layers --out results_two_model_no_layers
     python pi_run.py test_sample_clean $H --layers motion --out results_motion
     python pi_run.py test_sample_clean $H --layers motion,bg --out results_motion_bg
     python pi_run.py test_sample_clean $H --layers motion,bg,shape --out results_all_layers
+    python pi_run.py test_sample_clean $H --layers motion,bg,shape --layer-width 320 --layer-every 2 --out results_layers_320_every2
 
 Three threads overlap: read, whole-frame model, finish (crops + shape layer + booster/keeper + tracker). Per video it prints
 end-to-end fps and ms per stage; the slowest thread is the fps limit (50 fps = 20 ms per frame).
