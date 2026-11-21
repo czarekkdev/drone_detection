@@ -15,6 +15,9 @@ MERGE = True       # two tracks on the same drone (one box INSIDE the other): ke
 MIN_TRACK = 12     # result files: drop every appearance of a drone (same number, gaps <= 5 frames) shorter than this
                    # many frames (0.4 s). Real setup: 0.8848 -> 0.8882; Anti-UAV ID switches 35 -> 21. 30 (1 s) is worse.
                    # Applied when the file is written (needs to see the whole appearance); 0 = off
+MIN_TRACK_CONF = 0.5  # result files: judge each appearance by its first 2 s (60 frames); median confidence below this =
+                   # not a drone, the whole appearance is removed. Practice: real drones 0.60-0.84, the one long fake
+                   # track 0.39 -> removed: wrong boxes 94 -> 31, no drone frames lost (cloud test). 0 = off
 SAME_SPOT = 0.5    # two output boxes whose centres are closer than this x the bigger box's size = same spot: show one
 MIN_SHOW = 0.05    # don't output boxes below this confidence (tracking continues underneath). Practice 0.8832 -> 0.8848,
                    # Anti-UAV 0.631 -> 0.635 (not tuned there); 0.1+ is worse (hides correct faint / coasting boxes)
@@ -313,7 +316,7 @@ def dedupe_lines(lines):
         if k not in best or float(v[6]) > float(best[k].split(",")[6]):
             best[k] = l
     keys = sorted(best)
-    if MIN_TRACK:
+    if MIN_TRACK or MIN_TRACK_CONF:
         keep = set(); by = {}
         for f, i in keys:
             by.setdefault(i, []).append(f)
@@ -322,7 +325,10 @@ def dedupe_lines(lines):
             for f in fs[1:] + [None]:
                 if f is not None and f - run[-1] <= 5:
                     run.append(f); continue
-                if run[-1] - run[0] + 1 >= MIN_TRACK:
+                ok = run[-1] - run[0] + 1 >= MIN_TRACK
+                if ok and MIN_TRACK_CONF:
+                    ok = np.median([float(best[(g, i)].split(",")[6]) for g in run[:60]]) >= MIN_TRACK_CONF
+                if ok:
                     keep.update((g, i) for g in run)
                 if f is not None:
                     run = [f]
