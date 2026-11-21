@@ -219,7 +219,14 @@ class TwoDroneTracker:
                 out.append((frame, t.id, t.box(), t.conf))
             else:  # coasting: predicted box, lower confidence
                 out.append((frame, t.id, t.box(), t.conf * 0.6 ** t.miss))
-        return [o for o in (self._clip(o) for o in out) if o is not None]
+        out = [o for o in (self._clip(o) for o in out) if o is not None]
+        if INSIDE:  # safety net: never output two boxes on the same spot in one frame; keep the more confident one
+            cur = sorted([o for o in out if o[0] == frame], key=lambda o: -o[3]); keep = []
+            for o in cur:
+                if not any(max(_inside(o[2], k[2]), _inside(k[2], o[2])) >= INSIDE for k in keep):
+                    keep.append(o)
+            out = [o for o in out if o[0] != frame] + keep
+        return out
 
     def _clip(self, o):
         """keep boxes inside the picture (a coasting drone flying out would otherwise get negative coordinates);

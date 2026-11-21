@@ -25,6 +25,8 @@ p.add_argument("--imgsz", type=int, default=1280)
 p.add_argument("--no-show", action="store_true"); p.add_argument("--no-save", action="store_true")
 p.add_argument("--out", default=os.path.join(HERE, "demo_out"))
 p.add_argument("--layer-width", type=int, default=480)
+p.add_argument("--show-min", type=float, default=0.3, help="only DRAW boxes at least this confident (the saved .txt keeps all boxes; "
+               "for the score, hiding low boxes costs: 0.3 -> MOTA -0.002)")
 p.add_argument("--boost-lo", type=float, default=0.10); p.add_argument("--boost-to", type=float, default=0.65)
 a = p.parse_args()
 dev = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
@@ -186,7 +188,7 @@ while True:
                 for k in range(1, len(pts)):
                     cv2.line(img, pts[k - 1], pts[k], COL.get(i, (0, 255, 0)), 2)
         for f, i, (x1, y1, x2, y2), c in out:
-            if f == n:
+            if f == n and c >= a.show_min:
                 col = COL.get(i, (0, 255, 0))
                 cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), col, 3)
                 cv2.putText(img, f"drone {i} {c:.2f}", (int(x1), max(20, int(y1) - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, col, 2)
