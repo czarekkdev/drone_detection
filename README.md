@@ -670,9 +670,15 @@ Add `--fast-align` to replace CPU corner tracking and homography fitting with fa
     python pi_run.py test_sample_clean $H --layers motion,bg,shape --out results_all_layers
     python pi_run.py test_sample_clean $H --layers motion,bg,shape --layer-width 320 --layer-every 2 --out results_layers_320_every2
 
+For the submission format in `RESULT_FORMAT.md`, add `--output-format competition`. It writes a `detection.txt`
+beside each input `video.mp4`, with one row per drone/frame, Unix capture and answer times, and an `id=-1`
+zero-box row when no result is emitted. The default `mot` format remains available for `eval_track.py`.
+
+    python pi_run.py ../../final_test $H --simple --output-format competition
+
 Three threads overlap: read, whole-frame model, finish (crops + shape layer + booster/keeper + tracker). Per video it prints
 end-to-end fps and ms per stage; the slowest thread is the fps limit (50 fps = 20 ms per frame).
-Results go to `results/<video folder name>.txt`, the competition format.
+Default MOT results go to `results/<video folder name>.txt`; `--output-format competition` writes `detection.txt` beside each video.
 
 What to expect and what to try:
 - The score will be somewhat below 0.883: the whole frame runs at 640 instead of 1280, and both models in 8-bit.

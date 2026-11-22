@@ -87,12 +87,13 @@ def read_dets(path):
     return D
 
 
-def run(source, backend, booster, out_path, realtime=False, cached=None):
+def run(source, backend, booster, out_path, realtime=False, cached=None, output_format="mot"):
     cap = cv2.VideoCapture(int(source) if str(source).isdigit() else source)
     W, H = int(cap.get(3)), int(cap.get(4)); src_fps = cap.get(5) or 30
     q1, q2 = queue.Queue(maxsize=4), queue.Queue(maxsize=4)
     T = TwoDroneTracker(frame_size=(W, H)); booster.reset()
     t = {"read": [], "model": [], "finish": [], "track": []}; lines = []; done_t = {}
+    got_times, answer_times, frame_boxes = {}, {}, {}
 
     def reader():
         n = 0; t_start = time.time()
@@ -100,12 +101,14 @@ def run(source, backend, booster, out_path, realtime=False, cached=None):
             t0 = time.time(); ok, f = cap.read(); t["read"].append(time.time() - t0)
             if not ok:
                 break
+            t_got = time.time()
             n += 1
             if realtime:  # behave like a camera: frames arrive at the video's fps
                 wait = t_start + n / src_fps - time.time()
                 if wait > 0:
                     time.sleep(wait)
-            q1.put((n, f, time.time()))
+            got_times[n] = t_got
+            q1.put((n, f, t_got))
         q1.put(None)
 
     def model():  # whole-frame detector (or cached detections)
@@ -126,8 +129,12 @@ def run(source, backend, booster, out_path, realtime=False, cached=None):
             n, f, dets, t_in = item; t0 = time.time()
             dets = booster.step(f, dets, T)
             t1 = time.time()
-            for f2, i, (x1, y1, x2, y2), c in T.step(n, dets):
+            tracked = T.step(n, dets)
+            t_answer = time.time()
+            answer_times[n] = t_answer
+            for f2, i, (x1, y1, x2, y2), c in tracked:
                 lines.append(f"{f2},{i},{x1:.2f},{y1:.2f},{x2 - x1:.2f},{y2 - y1:.2f},{c:.4f}")
+                frame_boxes.setdefault(f2, []).append((i, (x1, y1, x2, y2), c, t_answer))
             t["track"].append(time.time() - t1); t["finish"].append(time.time() - t0); lat.append(time.time() - t_in)
         done_t["lat"] = lat; done_t["n"] = len(lat)
 
@@ -138,8 +145,30 @@ def run(source, backend, booster, out_path, realtime=False, cached=None):
     for th in ths:
         th.join()
     total = time.time() - t_start; n = done_t["n"]
-    lines = dedupe_lines(lines)
-    open(out_path, "w").write("\n".join(lines) + "\n")
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    if output_format == "competition":
+        formatted = []
+        for frame in range(1, n + 1):
+            boxes = {}
+            for tid, box, conf, _ in frame_boxes.get(frame, []):
+                if tid not in boxes or conf > boxes[tid][1]:
+                    boxes[tid] = (box, conf)
+            t_got = got_times[frame]
+            t_answer = max([answer_times.get(frame, t_got)] +
+                           [item[3] for item in frame_boxes.get(frame, [])])
+            if not boxes:
+                formatted.append(f"{frame},-1,0,0,0,0,{t_got:.3f},{t_answer:.3f}")
+                continue
+            for tid, (box, _) in sorted(boxes.items()):
+                x1, y1, x2, y2 = box
+                formatted.append(f"{frame},{tid},{x1:.2f},{y1:.2f},{x2-x1:.2f},{y2-y1:.2f},"
+                                 f"{t_got:.3f},{t_answer:.3f}")
+        with open(out_path, "w") as f:
+            f.write("\n".join(formatted) + "\n")
+    else:
+        lines = dedupe_lines(lines)
+        with open(out_path, "w") as f:
+            f.write("\n".join(lines) + "\n")
     ms = {k: 1000 * np.mean(v) if v else 0 for k, v in t.items()}
     bt = {k: 1000 * np.mean(v) if v else 0 for k, v in booster.t.items()}
     stages = {"read": ms["read"], "model": ms["model"], "finish": ms["finish"]}  # the 3 threads
@@ -181,6 +210,8 @@ if __name__ == "__main__":
     p.add_argument("--cmc", action="store_true", help="experimental: shift the tracker with the camera motion (off: 0.860 -> 0.863 MOTA "
                    "and 101 -> 87 wrong boxes in a test, but one re-entry after both drones left got the other number)")
     p.add_argument("--out", default="results")
+    p.add_argument("--output-format", choices=("mot", "competition"), default="mot",
+                   help="MOT text files in --out, or detection.txt beside each input video with timestamps")
     a = p.parse_args()
     layer_names = tuple(x.strip() for x in a.layers.split(",") if x.strip())
     invalid_layers = set(layer_names) - {"motion", "bg", "shape"}
@@ -210,13 +241,21 @@ if __name__ == "__main__":
         booster = Booster(cb, crop_scale=2.0, crop_imgsz=320, layer_width=a.layer_width, cmc=a.cmc,
                           use_layers=not a.no_layers, layers=layer_names, layer_every=a.layer_every,
                           fast_align=a.fast_align)
-    os.makedirs(a.out, exist_ok=True)
+    if a.output_format == "mot":
+        os.makedirs(a.out, exist_ok=True)
     if os.path.isdir(a.source):
         for v in sorted(glob.glob(os.path.join(a.source, "*", "video.mp4"))):
             name = os.path.basename(os.path.dirname(v))
             cached = read_dets(os.path.join(a.dets, name + ".txt")) if a.dets else None
-            run(v, be, booster, os.path.join(a.out, name + ".txt"), cached=cached)
+            out_path = (os.path.join(os.path.dirname(v), "detection.txt") if a.output_format == "competition"
+                        else os.path.join(a.out, name + ".txt"))
+            run(v, be, booster, out_path, cached=cached, output_format=a.output_format)
     else:
         name = "camera" if a.source.isdigit() else (os.path.basename(os.path.dirname(os.path.abspath(a.source))) if os.path.basename(a.source) == "video.mp4" else os.path.splitext(os.path.basename(a.source))[0])
         cached = read_dets(os.path.join(a.dets, name + ".txt")) if a.dets else None
-        run(a.source, be, booster, os.path.join(a.out, name + ".txt"), realtime=a.realtime, cached=cached)
+        if a.output_format == "competition":
+            out_path = os.path.join(a.out, "detection.txt") if a.source.isdigit() else os.path.join(os.path.dirname(os.path.abspath(a.source)), "detection.txt")
+        else:
+            out_path = os.path.join(a.out, name + ".txt")
+        run(a.source, be, booster, out_path, realtime=a.realtime, cached=cached,
+            output_format=a.output_format)
