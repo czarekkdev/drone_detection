@@ -224,11 +224,12 @@ if __name__ == "__main__":
     if a.backend == "hailo":
         from hailo_platform import VDevice
         params = VDevice.create_params()
-        try:  # let HailoRT switch between the two models
-            from hailo_platform import HailoSchedulingAlgorithm
-            params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
-        except Exception:
-            pass
+        if not a.simple:  # scheduling is only useful when the separate crop HEF is active
+            try:
+                from hailo_platform import HailoSchedulingAlgorithm
+                params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
+            except Exception:
+                pass
         vd = VDevice(params)
         be = HailoBackend(a.hef, vd)
         cb = be if a.simple else HailoBackend(a.crop_hef, vd)

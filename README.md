@@ -672,7 +672,8 @@ Add `--fast-align` to replace CPU corner tracking and homography fitting with fa
 
 For the submission format in `RESULT_FORMAT.md`, add `--output-format competition`. It writes a `detection.txt`
 beside each input `video.mp4`, with one row per drone/frame, Unix capture and answer times, and an `id=-1`
-zero-box row when no result is emitted. The default `mot` format remains available for `eval_track.py`.
+zero-box row when no result is emitted. The default `mot` format remains available for `eval_track.py`;
+`eval_track.py` does not read competition-format `detection.txt` files.
 
     python pi_run.py ../../final_test $H --simple --output-format competition
 
